@@ -90,6 +90,7 @@ export function Composer(p: ComposerProps) {
         </label>
         <textarea
           id="tutor-input"
+          data-focus-ring="parent"
           ref={ta}
           rows={1}
           value={shown}

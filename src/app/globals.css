@@ -120,6 +120,11 @@ body {
   border-radius: 6px;
 }
 
+/* Fields inside a container that draws its own focus ring (the tutor composer). */
+[data-focus-ring="parent"]:focus-visible {
+  outline: none;
+}
+
 /* Dot grid used behind the landing hero and empty states — a nod to a board. */
 .bg-dotgrid {
   background-image: radial-gradient(var(--bg-grid) 1.1px, transparent 1.1px);
