@@ -28,7 +28,7 @@ export function SourcesPanel({ selected, onChange, onClose }: { selected: string
       </div>
       <div className="max-h-44 overflow-y-auto">
         {loading ? null : docs.length === 0 ? (
-          <p className="py-2 text-[12.5px] text-muted">No documents yet. Upload a PDF, .txt or .md file (up to 15 MB).</p>
+          <p className="py-2 text-[12.5px] text-muted">No documents yet. Upload a PDF, Word, PowerPoint, .txt or .md file (up to 15 MB).</p>
         ) : (
           <ul className="flex flex-col gap-1">
             {docs.map((d) => (

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { BookOpenText, Check, HelpCircle, Lightbulb, MessageCircleQuestion, Shapes, Sparkles, SquareFunction, Table2, Type, Waypoints, LineChart, Highlighter, ImageIcon } from "lucide-react";
+import { BookOpenText, Check, HelpCircle, Lightbulb, MessageCircleQuestion, Paperclip, Shapes, Sparkles, SquareFunction, Table2, Type, Waypoints, LineChart, Highlighter, ImageIcon } from "lucide-react";
 import type { BoardAction } from "@/lib/board/schema";
 import type { StoredMessage, StoredStep } from "@/lib/store/types";
 import type { CheckAnswer } from "./TutorWorkspace";
@@ -69,10 +69,21 @@ export function MessageList({
             {m.role === "user" ? (
               <div className="ml-8 flex flex-col items-end">
                 <div className="max-w-full rounded-2xl rounded-br-md bg-ink px-3.5 py-2.5 text-[14.5px] leading-relaxed text-bg">
-                  {m.hadImage && (
-                    <span className="mb-1 flex items-center gap-1 text-[12px] opacity-75">
-                      <ImageIcon className="size-3.5" /> Image attached
+                  {m.attachments?.length ? (
+                    <span className="mb-1 flex flex-wrap gap-x-2.5 gap-y-0.5 text-[12px] opacity-75">
+                      {m.attachments.map((a, j) => (
+                        <span key={j} className="flex min-w-0 items-center gap-1">
+                          {a.kind === "image" ? <ImageIcon className="size-3.5 shrink-0" /> : <Paperclip className="size-3.5 shrink-0" />}
+                          <span className="max-w-[180px] truncate">{a.name}</span>
+                        </span>
+                      ))}
                     </span>
+                  ) : (
+                    m.hadImage && (
+                      <span className="mb-1 flex items-center gap-1 text-[12px] opacity-75">
+                        <ImageIcon className="size-3.5" /> Image attached
+                      </span>
+                    )
                   )}
                   <p className="whitespace-pre-wrap break-words">{m.content}</p>
                 </div>
@@ -174,7 +185,7 @@ function AssistantMessage({
               <BookOpenText className="size-3.5" /> Searched your documents
             </span>
             <span className="mt-0.5 block text-muted">
-              {m.citations.map((c) => `${c.source}${c.page ? `, p. ${c.page}` : ""}`).join(" · ")}
+              {m.citations.map((c) => `${c.source}${c.page ? `, ${c.unit === "slide" ? "slide" : "p."} ${c.page}` : ""}`).join(" · ")}
             </span>
           </div>
         )}

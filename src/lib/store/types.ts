@@ -35,7 +35,9 @@ export interface StoredMessage {
   followups?: string[];
   notices?: string[];
   hadImage?: boolean;
-  citations?: { source: string; page?: number }[];
+  /** Files attached to this (user) message, for display. */
+  attachments?: { name: string; kind: "image" | "document" }[];
+  citations?: { source: string; page?: number; unit?: "slide" }[];
   error?: { code: string; message: string; hint?: string };
   createdAt: number;
 }

@@ -40,7 +40,7 @@ export class OpenAICompatibleProvider implements AIProvider {
     const isReasoning = /gpt-oss|gpt-5|^o\d|qwen3|deepseek-r1/i.test(model);
     if (this.cfg.provider === "openai" || this.cfg.provider === "groq") {
       // Reasoning models spend part of the budget thinking; give them headroom.
-      body.max_completion_tokens = isReasoning ? maxTokens + 2048 : maxTokens;
+      body.max_completion_tokens = isReasoning && req.effort !== "none" ? maxTokens + 2048 : maxTokens;
     } else {
       body.max_tokens = maxTokens;
     }
@@ -48,9 +48,12 @@ export class OpenAICompatibleProvider implements AIProvider {
     if (req.temperature !== undefined && !fixedTemperature) body.temperature = req.temperature;
     if (req.json && this.cfg.supportsJsonMode && !needsVision) body.response_format = { type: "json_object" };
     if (/gpt-oss/i.test(model) && (this.cfg.provider === "groq" || this.cfg.provider === "openrouter")) {
-      body.reasoning_effort = req.effort ?? "low";
+      body.reasoning_effort = req.effort === "none" || !req.effort ? "low" : req.effort;
+    } else if (/qwen3/i.test(model) && this.cfg.provider === "groq") {
+      // Groq's Qwen 3 models take "none" (no thinking) or "default".
+      body.reasoning_effort = req.effort === "none" ? "none" : "default";
     } else if (this.cfg.provider === "openai" && isReasoning) {
-      body.reasoning_effort = req.effort === "high" ? "medium" : "low";
+      body.reasoning_effort = req.effort === "high" ? "medium" : req.effort === "none" ? "minimal" : "low";
     }
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };

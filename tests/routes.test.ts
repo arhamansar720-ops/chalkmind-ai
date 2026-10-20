@@ -89,6 +89,49 @@ describe("POST /api/tutor", () => {
     expect(JSON.stringify(events)).not.toContain("document.cookie");
   });
 
+  it("reads images with the vision model first, then teaches with the main model", async () => {
+    process.env.AI_PROVIDER = "groq";
+    process.env.AI_API_KEY = "test";
+    const sse = (text: string) => {
+      const enc = new TextEncoder();
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`));
+            c.enqueue(enc.encode("data: [DONE]\n\n"));
+            c.close();
+          },
+        }),
+        { status: 200 },
+      );
+    };
+    const bodies: { model: string; messages: { content: unknown }[]; max_completion_tokens: number; reasoning_effort?: string }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body));
+        bodies.push(body);
+        return bodies.length === 1 ? sse("Image 1: Solve $3x + 4 = 19$") : sse('{"t":"say","text":"Subtract 4 first."}');
+      }),
+    );
+    const { POST } = await import("@/app/api/tutor/route");
+    const img = "data:image/png;base64,iVBORw0KGgo=";
+    const events = await readEvents(await POST(post({ messages: [{ role: "user", content: "Help with this" }], images: [img] })));
+    expect(events.find((e) => e.type === "say")).toMatchObject({ text: "Subtract 4 first." });
+    expect(bodies).toHaveLength(2);
+    // 1) the vision model sees the image, with a short output budget and no thinking
+    expect(bodies[0].model).toBe("qwen/qwen3.8-27b");
+    expect(JSON.stringify(bodies[0].messages)).toContain("image_url");
+    expect(bodies[0].reasoning_effort).toBe("none");
+    expect(bodies[0].max_completion_tokens).toBeLessThanOrEqual(1000);
+    // 2) the main model gets the transcription as text, never the image
+    expect(bodies[1].model).toBe("openai/gpt-oss-120b");
+    const mainUser = JSON.stringify(bodies[1].messages.at(-1));
+    expect(mainUser).not.toContain("image_url");
+    expect(mainUser).toContain("Solve $3x + 4 = 19$");
+    expect(mainUser).toContain("Help with this");
+  });
+
   it("reports provider failures as an error event", async () => {
     process.env.AI_PROVIDER = "groq";
     process.env.AI_API_KEY = "bad";
@@ -143,6 +186,20 @@ describe("POST /api/documents/extract", () => {
     expect((await ok.json()).pages[0].text).toContain("chloroplasts");
     expect((await POST(upload(new File([""], "empty.txt", { type: "text/plain" })))).status).toBe(422);
     expect((await POST(upload(new File(["MZ\u0000\u0000"], "virus.exe", { type: "application/octet-stream" })))).status).toBe(415);
+  });
+  it("extracts PowerPoint slides and rejects legacy Office files", async () => {
+    const { strToU8, zipSync } = await import("fflate");
+    const { POST } = await import("@/app/api/documents/extract/route");
+    const deck = zipSync({
+      "ppt/presentation.xml": strToU8("<p:presentation/>"),
+      "ppt/slides/slide1.xml": strToU8('<p:sld xmlns:a="a"><a:p><a:r><a:t>Cell membranes</a:t></a:r></a:p></p:sld>'),
+    });
+    const res = await POST(upload(new File([deck], "bio.pptx", { type: "application/vnd.openxmlformats-officedocument.presentationml.presentation" })));
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.mime).toContain("presentationml");
+    expect(json.pages).toEqual([{ page: 1, text: "Cell membranes" }]);
+    expect((await POST(upload(new File(["\u00d0\u00cf\u0011\u00e0 legacy"], "old.ppt", { type: "application/vnd.ms-powerpoint" })))).status).toBe(415);
   });
   it("reports corrupted PDFs", async () => {
     const { POST } = await import("@/app/api/documents/extract/route");

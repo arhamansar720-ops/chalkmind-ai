@@ -81,17 +81,18 @@ export function slugify(s: string): string {
 
 /** Read an image file and downscale it so uploads stay small (longest side ≤ maxSide). */
 export async function imageFileToDataUrl(file: File, maxSide = 1600): Promise<string> {
-  if (!/^image\/(png|jpe?g|webp|gif)$/i.test(file.type)) throw new Error("Use a PNG, JPEG, WEBP or GIF image.");
+  if (!/^image\/(png|jpe?g|webp|gif|heic|heif)$/i.test(file.type) && !/\.(heic|heif)$/i.test(file.name)) throw new Error("Use a PNG, JPEG, WEBP, GIF or HEIC image.");
   if (file.size > 15 * 1024 * 1024) throw new Error("Images must be 15 MB or smaller.");
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const el = new Image();
       el.onload = () => resolve(el);
-      el.onerror = () => reject(new Error("That image couldn't be opened."));
+      el.onerror = () => reject(new Error(/heic|heif/i.test(file.type + file.name) ? "This browser can't open HEIC photos. Export it as JPEG and try again." : "That image couldn't be opened."));
       el.src = url;
     });
-    const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+    // Shrink big photos; enlarge tiny images (vision models reject sides under 32 px).
+    const scale = Math.max(Math.min(1, maxSide / Math.max(img.width, img.height)), 32 / Math.min(img.width, img.height));
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(img.width * scale);
     canvas.height = Math.round(img.height * scale);

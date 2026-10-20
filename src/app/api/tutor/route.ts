@@ -3,8 +3,9 @@ import { toAIError } from "@/lib/ai/errors";
 import { JsonObjectStream } from "@/lib/ai/json-stream";
 import type { ChatMessage } from "@/lib/ai/types";
 import { errorResponse, guardAIRequest } from "@/lib/server/http";
-import { modelObjectToEvents, tutorRequestSchema, type TutorEvent } from "@/lib/tutor/protocol";
+import { modelObjectToEvents, requestImages, tutorRequestSchema, type TutorEvent } from "@/lib/tutor/protocol";
 import { tutorSystemPrompt } from "@/lib/tutor/prompt";
+import { inlineTranscript, needsTranscription, transcribeImages } from "@/lib/ai/vision";
 
 export const maxDuration = 60;
 
@@ -28,10 +29,11 @@ export async function POST(req: Request) {
 
   const history = input.messages.slice(-HISTORY);
   const isFirstTurn = history.filter((m) => m.role === "assistant").length === 0;
-  const messages: ChatMessage[] = history.map((m, i) => {
+  const images = requestImages(input);
+  let messages: ChatMessage[] = history.map((m, i) => {
     const isLast = i === history.length - 1;
-    if (isLast && m.role === "user" && input.image) {
-      return { role: "user", content: [{ type: "image", dataUrl: input.image }, { type: "text", text: m.content }] };
+    if (isLast && m.role === "user" && images.length) {
+      return { role: "user", content: [...images.map((dataUrl) => ({ type: "image" as const, dataUrl })), { type: "text", text: m.content }] };
     }
     return { role: m.role, content: m.content };
   });
@@ -45,12 +47,17 @@ export async function POST(req: Request) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (ev: TutorEvent) => controller.enqueue(encoder.encode(JSON.stringify(ev) + "\n"));
-      send({ type: "meta", provider: provider.id, model: input.image ? provider.visionModel ?? provider.model : provider.model });
+      const twoStep = images.length > 0 && needsTranscription(provider);
+      send({ type: "meta", provider: provider.id, model: images.length && !twoStep ? provider.visionModel ?? provider.model : provider.model });
       const parser = new JsonObjectStream();
       let said = false;
       let truncated = false;
       let lastThinking = 0;
       try {
+        if (twoStep) {
+          send({ type: "thinking" });
+          messages = inlineTranscript(messages, images.length, await transcribeImages(provider, images, req.signal));
+        }
         for await (const chunk of provider.stream({
           system,
           messages,

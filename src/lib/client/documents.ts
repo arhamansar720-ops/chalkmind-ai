@@ -6,7 +6,18 @@ import { newId, store } from "../store";
 import type { DocumentRecord } from "../store/types";
 import { ApiError, postForm, postJSON } from "./api";
 
-export const ACCEPTED_DOCS = ".pdf,.txt,.md,application/pdf,text/plain,text/markdown";
+export const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+export const PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+const DOC_TYPES = ["application/pdf", "text/plain", "text/markdown", DOCX_MIME, PPTX_MIME];
+export const ACCEPTED_DOCS = [".pdf", ".docx", ".pptx", ".txt", ".md", ...DOC_TYPES].join(",");
+export const ACCEPTED_IMAGES = "image/png,image/jpeg,image/webp,image/gif,image/heic,image/heif";
+
+/** Documents become searchable sources; images go to the vision model. */
+export function attachmentKind(file: File): "document" | "image" | null {
+  if (/^image\//.test(file.type) || /\.(png|jpe?g|webp|gif|heic|heif)$/i.test(file.name)) return "image";
+  if (DOC_TYPES.includes(file.type) || /\.(pdf|docx|pptx|txt|md)$/i.test(file.name)) return "document";
+  return null;
+}
 export const MAX_DOC_BYTES = 15 * 1024 * 1024;
 
 export interface IngestProgress {
@@ -22,9 +33,8 @@ export interface IngestProgress {
 export async function ingestDocument(file: File, opts: { embeddings: boolean; onProgress?: (p: IngestProgress) => void }): Promise<DocumentRecord> {
   if (file.size > MAX_DOC_BYTES) throw new ApiError("too_large", "Files must be 15 MB or smaller.");
   const lower = file.name.toLowerCase();
-  if (!/\.(pdf|txt|md)$/.test(lower) && !["application/pdf", "text/plain", "text/markdown"].includes(file.type)) {
-    throw new ApiError("unsupported_type", "Upload a PDF, .txt or .md file.");
-  }
+  if (/\.(doc|ppt)$/.test(lower)) throw new ApiError("unsupported_type", "Old .doc/.ppt files aren't supported. Save it as .docx or .pptx (or PDF).");
+  if (attachmentKind(file) !== "document") throw new ApiError("unsupported_type", "Upload a PDF, Word (.docx), PowerPoint (.pptx), .txt or .md file.");
   opts.onProgress?.({ stage: "uploading" });
   const form = new FormData();
   form.append("file", file);
@@ -32,7 +42,7 @@ export async function ingestDocument(file: File, opts: { embeddings: boolean; on
 
   opts.onProgress?.({ stage: "chunking" });
   const id = newId("doc");
-  const chunks: DocumentRecord["chunks"] = chunkPages(extracted.pages, id).map((c) => ({ ...c, page: extracted.mime === "application/pdf" ? c.page : undefined }));
+  const chunks: DocumentRecord["chunks"] = chunkPages(extracted.pages, id).map((c) => ({ ...c, page: extracted.mime === "application/pdf" || extracted.mime === PPTX_MIME ? c.page : undefined }));
   if (chunks.length === 0) throw new ApiError("no_text", "No readable text was found in that file.");
 
   let embeddingModel: string | undefined;
@@ -57,7 +67,7 @@ export async function ingestDocument(file: File, opts: { embeddings: boolean; on
   const now = Date.now();
   const doc: DocumentRecord = {
     id,
-    title: extracted.name.replace(/\.(pdf|txt|md)$/i, ""),
+    title: extracted.name.replace(/\.(pdf|docx|pptx|txt|md)$/i, ""),
     name: extracted.name,
     size: extracted.size,
     mime: extracted.mime,
@@ -75,6 +85,8 @@ export async function ingestDocument(file: File, opts: { embeddings: boolean; on
 export interface Excerpt {
   source: string;
   page?: number;
+  /** Slides for presentations, pages otherwise. */
+  unit?: "slide";
   text: string;
 }
 
@@ -82,7 +94,7 @@ export interface Excerpt {
 export async function retrieveExcerpts(docIds: string[], query: string, k = 4): Promise<{ excerpts: Excerpt[]; method: "keyword" | "hybrid" | null }> {
   const docs = (await Promise.all(docIds.map((id) => store.get("documents", id)))).filter((d): d is DocumentRecord => Boolean(d));
   if (docs.length === 0) return { excerpts: [], method: null };
-  const all = docs.flatMap((d) => d.chunks.map((c) => ({ ...c, docName: d.title })));
+  const all = docs.flatMap((d) => d.chunks.map((c) => ({ ...c, docName: d.title, slides: d.mime === PPTX_MIME })));
   let queryEmbedding: number[] | null = null;
   if (all.some((c) => c.embedding?.length)) {
     try {
@@ -93,9 +105,17 @@ export async function retrieveExcerpts(docIds: string[], query: string, k = 4): 
   }
   const hits = searchChunks(query, all, k, queryEmbedding);
   return {
-    excerpts: hits.map((h) => ({ source: h.chunk.docName, page: h.chunk.page, text: h.chunk.text.slice(0, 1800) })),
+    excerpts: hits.map((h) => ({ source: h.chunk.docName, page: h.chunk.page, ...(h.chunk.slides ? { unit: "slide" as const } : {}), text: h.chunk.text.slice(0, 1800) })),
     method: hits[0]?.method ?? "keyword",
   };
+}
+
+/** Opening passages of documents attached to this very question ("summarize this"). */
+export async function leadExcerpts(docIds: string[], perDoc = 2): Promise<Excerpt[]> {
+  const docs = (await Promise.all(docIds.map((id) => store.get("documents", id)))).filter((d): d is DocumentRecord => Boolean(d));
+  return docs.flatMap((d) =>
+    d.chunks.slice(0, perDoc).map((c) => ({ source: d.title, page: c.page, ...(d.mime === PPTX_MIME ? { unit: "slide" as const } : {}), text: c.text.slice(0, 1800) })),
+  );
 }
 
 /** Plain text of a document, trimmed to fit a prompt. */
@@ -103,7 +123,7 @@ export function documentText(doc: DocumentRecord, maxChars = 30_000): string {
   let out = "";
   let page: number | undefined;
   for (const c of doc.chunks) {
-    if (c.page !== page && c.page) out += `\n\n[Page ${c.page}]\n`;
+    if (c.page !== page && c.page) out += `\n\n[${doc.mime === PPTX_MIME ? "Slide" : "Page"} ${c.page}]\n`;
     page = c.page;
     out += c.text + " ";
     if (out.length > maxChars) break;

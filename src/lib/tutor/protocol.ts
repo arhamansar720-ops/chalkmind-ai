@@ -19,7 +19,12 @@ export const SUBJECTS = [
   "General",
 ] as const;
 
-const MAX_IMAGE_CHARS = 5_600_000; // ≈ 4 MB of base64
+const MAX_IMAGE_CHARS = 5_600_000; // ≈ 4 MB of base64, across all images
+export const MAX_IMAGES = 4;
+const imageDataUrl = z
+  .string()
+  .max(MAX_IMAGE_CHARS)
+  .regex(/^data:image\/(png|jpe?g|webp|gif);base64,/i, "image must be a base64 PNG, JPEG, WEBP or GIF data URL");
 
 export const tutorRequestSchema = z.object({
   messages: z
@@ -46,16 +51,29 @@ export const tutorRequestSchema = z.object({
     })
     .optional(),
   excerpts: z
-    .array(z.object({ source: z.string().max(120), page: z.number().int().positive().optional(), text: z.string().max(2000) }))
-    .max(6)
+    .array(
+      z.object({
+        source: z.string().max(120),
+        page: z.number().int().positive().optional(),
+        unit: z.literal("slide").optional(),
+        text: z.string().max(2000),
+      }),
+    )
+    .max(8)
     .default([]),
-  /** Optional image attached to the latest user message. */
-  image: z
-    .string()
-    .max(MAX_IMAGE_CHARS)
-    .regex(/^data:image\/(png|jpe?g|webp|gif);base64,/i, "image must be a base64 PNG, JPEG, WEBP or GIF data URL")
-    .optional(),
+  /** Optional image attached to the latest user message (legacy single-image field). */
+  image: imageDataUrl.optional(),
+  /** Images attached to the latest user message. */
+  images: z.array(imageDataUrl).max(MAX_IMAGES).default([]),
+}).refine((r) => (r.image?.length ?? 0) + r.images.reduce((n, i) => n + i.length, 0) <= MAX_IMAGE_CHARS, {
+  message: "Attached images are too large in total. Attach fewer or smaller images.",
+  path: ["images"],
 });
+
+/** All images on the latest user message (legacy `image` first). */
+export function requestImages(r: Pick<TutorRequest, "image" | "images">): string[] {
+  return [...(r.image ? [r.image] : []), ...r.images].slice(0, MAX_IMAGES);
+}
 export type TutorRequest = z.infer<typeof tutorRequestSchema>;
 
 /* ------------------------------------------------------- model output lines */

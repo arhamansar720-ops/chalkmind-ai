@@ -6,6 +6,7 @@ import { homeworkSystemPrompt } from "@/lib/homework/prompt";
 import { HOMEWORK_MODES, homeworkSolutionSchema } from "@/lib/homework/schema";
 import { verifySolution } from "@/lib/homework/verify";
 import { errorResponse, guardAIRequest, HttpError } from "@/lib/server/http";
+import { needsTranscription, transcribeImages, transcriptNote } from "@/lib/ai/vision";
 
 export const maxDuration = 60;
 
@@ -39,9 +40,11 @@ export async function POST(req: Request) {
     ]
       .filter(Boolean)
       .join("\n\n");
-    const content: ContentPart[] = input.image
-      ? [{ type: "image", dataUrl: input.image }, { type: "text", text }]
-      : [{ type: "text", text }];
+    const twoStep = Boolean(input.image) && needsTranscription(provider);
+    const content: ContentPart[] =
+      input.image && !twoStep
+        ? [{ type: "image", dataUrl: input.image }, { type: "text", text }]
+        : [{ type: "text", text: twoStep ? `${transcriptNote(1, await transcribeImages(provider, [input.image!], req.signal))}\n\n${text}` : text }];
 
     const solution = await generateStructured(provider, homeworkSolutionSchema, {
       system: homeworkSystemPrompt(input.mode, input.subject),
@@ -52,7 +55,7 @@ export async function POST(req: Request) {
       signal: req.signal,
     });
     const verification = verifySolution(solution);
-    return Response.json({ solution, verification, model: input.image ? provider.visionModel : provider.model });
+    return Response.json({ solution, verification, model: input.image && !twoStep ? provider.visionModel : provider.model });
   } catch (err) {
     return errorResponse(err);
   }

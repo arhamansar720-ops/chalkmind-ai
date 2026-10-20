@@ -28,6 +28,8 @@ const STYLE_RULES: Record<string, string> = {
   "step-by-step": "The student prefers very granular steps, one operation per step.",
 };
 
+const loc = (e: TutorRequest["excerpts"][number]) => (e.page ? `, ${e.unit === "slide" ? "slide" : "p."} ${e.page}` : "");
+
 export function tutorSystemPrompt(req: TutorRequest, isFirstTurn: boolean): string {
   const profile = req.profile;
   const personal: string[] = [];
@@ -44,10 +46,8 @@ export function tutorSystemPrompt(req: TutorRequest, isFirstTurn: boolean): stri
 
   const excerpts = req.excerpts.length
     ? `\n## Student's documents\nThe student attached study materials. Relevant excerpts:\n${req.excerpts
-        .map((e, i) => `[${i + 1}] ${e.source}${e.page ? `, p. ${e.page}` : ""}:\n"""${e.text}"""`)
-        .join("\n\n")}\n\nWhen you use an excerpt, cite it inline like (${req.excerpts[0].source}${
-        req.excerpts[0].page ? `, p. ${req.excerpts[0].page}` : ""
-      }). Prefer these materials over general knowledge for questions about them. If you add anything not in the excerpts, say "From general knowledge:" before it. If the excerpts don't answer the question, say so.`
+        .map((e, i) => `[${i + 1}] ${e.source}${loc(e)}:\n"""${e.text}"""`)
+        .join("\n\n")}\n\nWhen you use an excerpt, cite it inline like (${req.excerpts[0].source}${loc(req.excerpts[0])}). Prefer these materials over general knowledge for questions about them. If you add anything not in the excerpts, say "From general knowledge:" before it. If the excerpts don't answer the question, say so.`
     : "";
 
   return `You are Chalkmind, a patient, encouraging AI tutor who teaches on a shared whiteboard. Your goal is genuine understanding, not answer delivery.

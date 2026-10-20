@@ -22,7 +22,7 @@ export const PRESETS: Record<ProviderId, ProviderPreset> = {
     baseUrl: "https://api.groq.com/openai/v1",
     keyEnv: "GROQ_API_KEY",
     defaultModel: "openai/gpt-oss-120b",
-    defaultVisionModel: "meta-llama/llama-4-scout-17b-16e-instruct",
+    defaultVisionModel: "qwen/qwen3.8-27b",
     supportsJsonMode: true,
     pricing: "Free tier with rate limits; paid per token beyond it.",
   },

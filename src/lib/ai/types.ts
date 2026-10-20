@@ -20,7 +20,7 @@ export interface GenerateRequest {
   /** Route to the configured vision model (required when messages contain images). */
   vision?: boolean;
   /** Reasoning budget for reasoning models that accept one (ignored elsewhere). */
-  effort?: "low" | "medium" | "high";
+  effort?: "none" | "low" | "medium" | "high";
   signal?: AbortSignal;
 }
 

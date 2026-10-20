@@ -6,14 +6,16 @@ import { BookmarkPlus, Check, CheckCircle2, MessagesSquare, PencilRuler, Volume2
 import { boardIndexFromElements, emptyCursor, type Cursor, type RegisteredItem } from "@/lib/board/layout";
 import { clearScene, cursorForScene, renderActions, snapshotScene, type BoardHandle } from "@/lib/board/render";
 import { ApiError, streamTutor } from "@/lib/client/api";
-import { retrieveExcerpts } from "@/lib/client/documents";
+import { attachmentKind, ingestDocument, leadExcerpts, retrieveExcerpts, type Excerpt } from "@/lib/client/documents";
+import type { ComposerAttachment } from "./Composer";
+import { MAX_IMAGES } from "@/lib/tutor/protocol";
 import { useHealth } from "@/lib/client/health";
 import { usePersonalization, useProfile } from "@/lib/client/profile";
 import { newId, store } from "@/lib/store";
 import type { StoredMessage, TutorSession } from "@/lib/store/types";
 import type { TutorEvent, TutorMode, TutorRequest } from "@/lib/tutor/protocol";
 import { assistantContextText, createSession, historyForRequest, mergeBoardIndex, STARTER_PROMPTS } from "@/lib/tutor/session";
-import { cn, speakableText } from "@/lib/utils";
+import { cn, imageFileToDataUrl, speakableText } from "@/lib/utils";
 import { useVoiceInput, useVoiceOutput } from "@/lib/voice/hooks";
 import { Blur, Reveal } from "@/components/Motion";
 import { boardDelay, readingDelay } from "@/lib/tutor/pace";
@@ -68,7 +70,8 @@ export function TutorWorkspace() {
   const sessionRef = useRef<TutorSession | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [input, setInput] = useState("");
-  const [image, setImage] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [status, setStatus] = useState<"idle" | "thinking" | "streaming">("idle");
@@ -204,7 +207,17 @@ export function TutorWorkspace() {
       const animate = !prefersReducedMotion();
       const pace = profile.pace ?? "normal";
 
-      const userMsg: StoredMessage = { id: newId("m"), role: "user", content: text, hadImage: Boolean(image), createdAt: Date.now() };
+      const imgs = attachments.flatMap((a) => (a.kind === "image" ? [a.dataUrl] : []));
+      const newDocIds = attachments.flatMap((a) => (a.kind === "document" && a.status === "ready" && a.docId ? [a.docId] : []));
+      const sent = attachments.filter((a) => a.kind === "image" || a.status === "ready").map((a) => ({ name: a.name, kind: a.kind }));
+      const userMsg: StoredMessage = {
+        id: newId("m"),
+        role: "user",
+        content: text,
+        hadImage: imgs.length > 0,
+        ...(sent.length ? { attachments: sent } : {}),
+        createdAt: Date.now(),
+      };
       const aId = newId("m");
       const aMsg: StoredMessage = { id: aId, role: "assistant", content: "", steps: [], followups: [], notices: [], createdAt: Date.now() + 1 };
       const prior = s.messages;
@@ -215,29 +228,35 @@ export function TutorWorkspace() {
         updatedAt: Date.now(),
       }));
       setInput("");
-      const img = image;
-      setImage(null);
+      setAttachments([]);
+      setAttachError(null);
       setBusy(true);
       setStatus("thinking");
       setStreamingId(aId);
 
       let citations: StoredMessage["citations"];
       let excerpts: TutorRequest["excerpts"] = [];
-      if (s.docIds.length) {
+      const docIds = [...new Set([...s.docIds, ...newDocIds])];
+      if (docIds.length) {
         try {
           const lastTutor = [...prior].reverse().find((m) => m.role === "assistant")?.content ?? "";
-          const r = await retrieveExcerpts(s.docIds, `${text} ${lastTutor.slice(0, 300)}`);
-          excerpts = r.excerpts;
+          const r = await retrieveExcerpts(docIds, `${text} ${lastTutor.slice(0, 300)}`);
+          // Files attached with this question are about this question: always include their opening.
+          const lead = newDocIds.length ? await leadExcerpts(newDocIds) : [];
+          const key = (e: Excerpt) => `${e.source}#${e.page}#${e.text.slice(0, 40)}`;
+          const merged = new Map<string, Excerpt>();
+          for (const e of [...lead, ...r.excerpts]) if (!merged.has(key(e))) merged.set(key(e), e);
+          excerpts = [...merged.values()].slice(0, 8);
           const seen = new Set<string>();
-          citations = r.excerpts
-            .map((e) => ({ source: e.source, page: e.page }))
+          citations = excerpts
+            .map((e) => ({ source: e.source, page: e.page, ...(e.unit ? { unit: e.unit } : {}) }))
             .filter((c) => {
               const k = `${c.source}#${c.page}`;
               if (seen.has(k)) return false;
               seen.add(k);
               return true;
             });
-          if (r.excerpts.length === 0) {
+          if (excerpts.length === 0) {
             updateMessage(aId, (m) => ({ ...m, notices: [...(m.notices ?? []), "No matching passages were found in your attached documents."] }));
           }
         } catch {
@@ -252,7 +271,7 @@ export function TutorWorkspace() {
         subject: s.subject,
         profile: personalization.profile,
         excerpts,
-        ...(img ? { image: img } : {}),
+        images: imgs,
       };
 
       const turn: Turn = {
@@ -269,7 +288,10 @@ export function TutorWorkspace() {
       abortRef.current = controller;
       let switchedToBoard = false;
 
-      const handle = async (ev: TutorEvent) => {
+      // Event types in arrival order, so a check-in can tell whether lesson steps follow it.
+      const arrived: TutorEvent["type"][] = [];
+      let streamEnded = false;
+      const handle = async (ev: TutorEvent, index: number) => {
         if (turn.stopped) return;
         switch (ev.type) {
           case "thinking":
@@ -349,6 +371,12 @@ export function TutorWorkspace() {
             // Only explain/simpler lessons pause; skip check-ins once the student hit Stop.
             if (turn.fast || (s.mode !== "explain" && s.mode !== "simpler")) break;
             await turn.speech;
+            if (streamEnded && !arrived.slice(index + 1).some((t) => t === "say" || t === "board")) {
+              // Nothing left to pause before: show it as the closing question instead.
+              if (!turn.mute) turn.speech = voiceOut.speak(speakableText(ev.question), { voiceURI: profile.voice.uri, rate: profile.voice.rate });
+              updateMessage(aId, (m) => ({ ...m, steps: [...(m.steps ?? []), { say: ev.question, actions: [] }] }));
+              break;
+            }
             const lastSay = [...(sessionRef.current?.messages.find((m) => m.id === aId)?.steps ?? [])].reverse().find((st) => st.say)?.say ?? "";
             updateMessage(aId, (m) => ({ ...m, steps: [...(m.steps ?? []), { say: "", actions: [], check: { question: ev.question } }] }));
             if (!turn.mute) turn.speech = voiceOut.speak(speakableText(ev.question), { voiceURI: profile.voice.uri, rate: profile.voice.rate });
@@ -410,7 +438,8 @@ export function TutorWorkspace() {
       let chain: Promise<void> = Promise.resolve();
       try {
         await streamTutor(req, (ev) => {
-          chain = chain.then(() => handle(ev)).catch(() => undefined);
+          const index = arrived.push(ev.type) - 1;
+          chain = chain.then(() => handle(ev, index)).catch(() => undefined);
         }, controller.signal);
       } catch (err) {
         const e = err instanceof ApiError ? err : new ApiError("unknown", "Something went wrong.");
@@ -422,6 +451,7 @@ export function TutorWorkspace() {
           updateMessage(aId, (m) => ({ ...m, error: { code: e.code, message: e.message, hint: e.hint } }));
         }
       }
+      streamEnded = true;
       await chain;
 
       const finalMsg = sessionRef.current?.messages.find((m) => m.id === aId);
@@ -443,7 +473,7 @@ export function TutorWorkspace() {
       await persist();
       if (turn.next) void askRef.current(turn.next);
     },
-    [image, mutate, personalization.profile, persist, profile, updateMessage, voiceOut],
+    [attachments, mutate, personalization.profile, persist, profile, updateMessage, voiceOut],
   );
 
   /* Auto-send a question handed over from the Homework Solver. */
@@ -458,17 +488,63 @@ export function TutorWorkspace() {
     askRef.current = ask;
   }, [ask]);
 
+  /* ------------------------------------------------------- attachments */
+  const addFiles = async (files: File[]) => {
+    setAttachError(null);
+    const visionOk = Boolean(health?.ai.configured && health.ai.visionModel);
+    let images = attachments.filter((a) => a.kind === "image").length;
+    const problems: string[] = [];
+    for (const file of files) {
+      const kind = attachmentKind(file);
+      const id = newId("att");
+      if (kind === "image") {
+        if (!visionOk) {
+          problems.push("The connected model can't read images.");
+          continue;
+        }
+        if (images >= MAX_IMAGES) {
+          problems.push(`You can attach up to ${MAX_IMAGES} images per question.`);
+          continue;
+        }
+        images++;
+        try {
+          const dataUrl = await imageFileToDataUrl(file);
+          setAttachments((list) => [...list, { id, kind: "image", name: file.name || "Image", dataUrl }]);
+        } catch (err) {
+          images--;
+          problems.push(`${file.name}: ${err instanceof Error ? err.message : "couldn't be used."}`);
+        }
+      } else if (kind === "document") {
+        setAttachments((list) => [...list, { id, kind: "document", name: file.name, status: "uploading" }]);
+        ingestDocument(file, { embeddings: Boolean(health?.embeddings.configured) })
+          .then((doc) => {
+            setAttachments((list) => list.map((a) => (a.id === id ? { ...a, status: "ready" as const, docId: doc.id } : a)));
+            // Attached files stay available as sources for the rest of the session.
+            mutate((x) => (x.docIds.includes(doc.id) ? x : { ...x, docIds: [...x.docIds, doc.id] }));
+          })
+          .catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : "Couldn't read this file.";
+            setAttachments((list) => list.map((a) => (a.id === id ? { ...a, status: "error" as const, error: msg } : a)));
+          });
+      } else {
+        problems.push(`${file.name}: unsupported file type. Attach a PDF, Word, PowerPoint, text file or image.`);
+      }
+    }
+    if (problems.length) setAttachError([...new Set(problems)].join(" "));
+  };
+
   /** Answer a pending check-in, or ask normally when the lesson isn't paused. */
   const submit = useCallback(
     (text: string) => {
-      const t = text.trim();
+      const hasFiles = attachments.some((a) => a.kind === "image" || a.status === "ready");
+      const t = text.trim() || (hasFiles && !checkRef.current ? "Can you help me understand what I attached?" : "");
       if (!t) return;
       if (checkRef.current) {
         setInput("");
         checkRef.current({ kind: "reply", text: t });
       } else void ask(t);
     },
-    [ask],
+    [ask, attachments],
   );
   const answerCheck = useCallback((a: CheckAnswer) => checkRef.current?.(a), []);
 
@@ -749,9 +825,10 @@ export function TutorWorkspace() {
             mode={session.mode}
             onModeChange={setMode}
             voice={{ supported: voiceIn.supported, listening: voiceIn.listening, interim: voiceIn.interim, error: voiceIn.error, onToggle: toggleMic }}
-            image={image}
-            onImage={setImage}
-            imageSupported={Boolean(health?.ai.configured && health.ai.visionModel)}
+            attachments={attachments}
+            onAddFiles={(files) => void addFiles(files)}
+            onRemoveAttachment={(id) => setAttachments((list) => list.filter((a) => a.id !== id))}
+            attachError={attachError}
             docCount={docCount}
             onOpenSources={() => setSourcesOpen((o) => !o)}
           />

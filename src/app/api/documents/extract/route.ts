@@ -2,17 +2,20 @@ import { jsonError } from "@/lib/server/http";
 import { aiLimiter } from "@/lib/server/rate-limit";
 import { verifyRequestUser } from "@/lib/server/auth";
 import { HttpError } from "@/lib/server/http-error";
+import { extractDocx, extractPptx, officeKind, OfficeError } from "@/lib/docs/office";
 
 export const maxDuration = 60;
 
 const MAX_BYTES = 15 * 1024 * 1024;
 const MAX_PAGES = 400;
 const MAX_CHARS = 1_500_000;
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 const TEXT_TYPES = new Set(["text/plain", "text/markdown", "text/x-markdown"]);
 
 /**
  * POST /api/documents/extract — multipart upload (field "file") → per-page
- * text. Supports PDF, .txt and .md. The file is processed in memory and not
+ * text. Supports PDF, Word (.docx), PowerPoint (.pptx), .txt and .md. The file is processed in memory and not
  * stored on the server; the browser keeps the extracted text.
  */
 export async function POST(req: Request) {
@@ -68,6 +71,22 @@ export async function POST(req: Request) {
       return Response.json({ name, mime: "application/pdf", size: file.size, pageCount: totalPages, pages: out });
     }
 
+    const office = officeKind(buf);
+    if (office) {
+      try {
+        const pages = office === "pptx" ? extractPptx(buf) : await extractDocx(buf);
+        const out = pages.map((p) => ({ page: p.page, text: p.text.slice(0, MAX_CHARS) }));
+        const mime = office === "pptx" ? PPTX_MIME : DOCX_MIME;
+        return Response.json({ name, mime, size: file.size, pageCount: out.length, pages: out });
+      } catch (err) {
+        if (err instanceof OfficeError) return jsonError(err.code === "too_large" ? 413 : 422, err.code, err.message);
+        throw err;
+      }
+    }
+    if (lower.endsWith(".doc") || lower.endsWith(".ppt")) {
+      return jsonError(415, "unsupported_type", "Old .doc/.ppt files aren't supported. Save it as .docx or .pptx (or PDF) and try again.");
+    }
+
     if (isText) {
       const text = new TextDecoder("utf-8", { fatal: false }).decode(buf).slice(0, MAX_CHARS);
       if (!text.trim()) return jsonError(422, "empty_file", "That file has no text.");
@@ -75,7 +94,7 @@ export async function POST(req: Request) {
       return Response.json({ name, mime: "text/plain", size: file.size, pageCount: 1, pages: [{ page: 1, text }] });
     }
 
-    return jsonError(415, "unsupported_type", "Unsupported file type. Upload a PDF, .txt or .md file.");
+    return jsonError(415, "unsupported_type", "Unsupported file type. Upload a PDF, Word (.docx), PowerPoint (.pptx), .txt or .md file.");
   } catch (err) {
     if (err instanceof HttpError) return jsonError(err.status, err.code, err.message);
     console.warn("[chalkmind] document extraction failed");
