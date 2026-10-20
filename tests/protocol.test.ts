@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { extractJsonObject, JsonObjectStream } from "@/lib/ai/json-stream";
 import { modelObjectToEvents, parseTutorEvent, tutorRequestSchema } from "@/lib/tutor/protocol";
+import { tutorSystemPrompt } from "@/lib/tutor/prompt";
 
 describe("JsonObjectStream", () => {
   it("extracts NDJSON objects split across arbitrary chunks", () => {
@@ -40,6 +41,12 @@ describe("modelObjectToEvents", () => {
     expect(modelObjectToEvents({ t: "check", question: "Does that step make sense?" })).toEqual([{ type: "check", question: "Does that step make sense?" }]);
     expect(modelObjectToEvents({ t: "check", question: "" })).toEqual([{ type: "notice", message: expect.any(String) }]);
     expect(parseTutorEvent(JSON.stringify({ type: "check", question: "Following so far?" }))).toEqual({ type: "check", question: "Following so far?" });
+  });
+
+  it("keeps useful memory facts and drops sensitive ones on the server", () => {
+    expect(modelObjectToEvents({ t: "remember", fact: "Is studying for the SAT in March", kind: "goal" })).toEqual([{ type: "remember", fact: "Is studying for the SAT in March.", kind: "goal" }]);
+    expect(modelObjectToEvents({ t: "remember", fact: "Their email is kid@school.edu", kind: "about" })).toEqual([]);
+    expect(modelObjectToEvents({ t: "remember", fact: "Likes diagrams", kind: "weird" })).toEqual([{ type: "remember", fact: "Likes diagrams.", kind: "about" }]);
   });
 
   it("validates board actions and reports rejects", () => {
@@ -91,5 +98,21 @@ describe("tutor request schema", () => {
     expect(tutorRequestSchema.safeParse({ ...base, image: "data:image/png;base64,AAAA" }).success).toBe(true);
     expect(tutorRequestSchema.safeParse({ ...base, image: "https://evil.example/x.png" }).success).toBe(false);
     expect(tutorRequestSchema.safeParse({ ...base, image: "data:text/html;base64,AAAA" }).success).toBe(false);
+  });
+});
+
+describe("memory in the prompt", () => {
+  const base = { messages: [{ role: "user", content: "hi" }] };
+  it("is included only when the student has memory on", () => {
+    const off = tutorSystemPrompt(tutorRequestSchema.parse(base), true);
+    expect(off).not.toContain("## Memory");
+    expect(off).not.toContain('"t":"remember"');
+    const on = tutorSystemPrompt(
+      tutorRequestSchema.parse({ ...base, memory: { facts: [{ fact: "Is in 9th grade.", kind: "about" }], lessons: [{ title: "Fractions", summary: "Struggled with common denominators.", when: "yesterday" }] } }),
+      true,
+    );
+    expect(on).toContain("- Is in 9th grade.");
+    expect(on).toContain('yesterday: "Fractions" — Struggled with common denominators.');
+    expect(on).toContain('"t":"remember"');
   });
 });

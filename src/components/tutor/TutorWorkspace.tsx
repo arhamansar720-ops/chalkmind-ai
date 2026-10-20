@@ -5,14 +5,15 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { BookmarkPlus, Check, CheckCircle2, MessagesSquare, PencilRuler, Volume2, VolumeX } from "lucide-react";
 import { boardIndexFromElements, emptyCursor, type Cursor, type RegisteredItem } from "@/lib/board/layout";
 import { clearScene, cursorForScene, renderActions, snapshotScene, type BoardHandle } from "@/lib/board/render";
-import { ApiError, streamTutor } from "@/lib/client/api";
+import { ApiError, postJSON, streamTutor } from "@/lib/client/api";
 import { attachmentKind, ingestDocument, leadExcerpts, retrieveExcerpts, type Excerpt } from "@/lib/client/documents";
 import type { ComposerAttachment } from "./Composer";
 import { MAX_IMAGES } from "@/lib/tutor/protocol";
 import { useHealth } from "@/lib/client/health";
 import { usePersonalization, useProfile } from "@/lib/client/profile";
-import { newId, store } from "@/lib/store";
-import type { StoredMessage, TutorSession } from "@/lib/store/types";
+import { newId, store, useCollection } from "@/lib/store";
+import { findDuplicate, needsSummary, overflow, selectFacts, selectLessons } from "@/lib/learning/memory";
+import type { MemoryFact, StoredMessage, TutorSession } from "@/lib/store/types";
 import type { TutorEvent, TutorMode, TutorRequest } from "@/lib/tutor/protocol";
 import { assistantContextText, createSession, historyForRequest, mergeBoardIndex, STARTER_PROMPTS } from "@/lib/tutor/session";
 import { cn, imageFileToDataUrl, speakableText } from "@/lib/utils";
@@ -63,6 +64,16 @@ export function TutorWorkspace() {
 
   const { data: health, loading: healthLoading } = useHealth();
   const { profile, update: updateProfile } = useProfile();
+  const memoryOn = profile.memory !== false;
+  const memories = useCollection("memories").items;
+  const allSessions = useCollection("sessions").items;
+  // Read inside ask() without re-creating it on every save.
+  const memoriesRef = useRef<MemoryFact[]>([]);
+  const sessionsRef = useRef<TutorSession[]>([]);
+  useEffect(() => {
+    memoriesRef.current = memories;
+    sessionsRef.current = allSessions;
+  }, [memories, allSessions]);
   const personalization = usePersonalization();
   const aiReady = Boolean(health?.ai.configured);
 
@@ -272,6 +283,14 @@ export function TutorWorkspace() {
         profile: personalization.profile,
         excerpts,
         images: imgs,
+        ...(memoryOn
+          ? {
+              memory: {
+                facts: selectFacts(memoriesRef.current, text).map((f) => ({ fact: f.fact, kind: f.kind })),
+                lessons: selectLessons(sessionsRef.current, s.id, text),
+              },
+            }
+          : {}),
       };
 
       const turn: Turn = {
@@ -408,6 +427,20 @@ export function TutorWorkspace() {
           case "followups":
             updateMessage(aId, (m) => ({ ...m, followups: ev.items }));
             break;
+          case "remember": {
+            if (!memoryOn) break;
+            const known = memoriesRef.current;
+            const dupe = findDuplicate(known, ev.fact);
+            const now = Date.now();
+            const record: MemoryFact = dupe
+              ? { ...dupe, fact: ev.fact, kind: ev.kind, title: ev.fact, updatedAt: now }
+              : { id: newId("mem"), title: ev.fact, fact: ev.fact, kind: ev.kind, source: "tutor", sessionId: s.id, createdAt: now, updatedAt: now };
+            memoriesRef.current = dupe ? known.map((f) => (f.id === dupe.id ? record : f)) : [...known, record];
+            void store.put("memories", record);
+            for (const old of overflow(memoriesRef.current)) void store.delete("memories", old.id);
+            if (!dupe) updateMessage(aId, (m) => ({ ...m, remembered: [...(m.remembered ?? []), ev.fact] }));
+            break;
+          }
           case "signal":
             if (profile.personalize) {
               const now = Date.now();
@@ -473,7 +506,7 @@ export function TutorWorkspace() {
       await persist();
       if (turn.next) void askRef.current(turn.next);
     },
-    [attachments, mutate, personalization.profile, persist, profile, updateMessage, voiceOut],
+    [attachments, memoryOn, mutate, personalization.profile, persist, profile, updateMessage, voiceOut],
   );
 
   /* Auto-send a question handed over from the Homework Solver. */
@@ -487,6 +520,32 @@ export function TutorWorkspace() {
   useEffect(() => {
     askRef.current = ask;
   }, [ask]);
+
+  /* Memory: recap earlier lessons (not the open one) so later sessions can recall them. */
+  const summarizingRef = useRef(false);
+  const currentId = session?.id ?? null;
+  useEffect(() => {
+    if (!memoryOn || !aiReady || summarizingRef.current) return;
+    const pending = allSessions.filter((x) => x.id !== currentId && needsSummary(x)).slice(0, 2);
+    if (!pending.length) return;
+    summarizingRef.current = true;
+    void (async () => {
+      for (const x of pending) {
+        try {
+          const messages = x.messages
+            .filter((m) => !m.error && m.content.trim())
+            .slice(-24)
+            .map((m) => ({ role: m.role, content: m.content.slice(0, 4000) }));
+          const { summary } = await postJSON<{ summary: string }>("/api/summarize", { title: x.title, messages });
+          const fresh = await store.get("sessions", x.id);
+          if (fresh && summary) await store.put("sessions", { ...fresh, summary: { text: summary, messageCount: x.messages.length, at: Date.now() } });
+        } catch {
+          break; // rate limited or offline: try again next time
+        }
+      }
+      summarizingRef.current = false;
+    })();
+  }, [memoryOn, aiReady, allSessions, currentId]);
 
   /* ------------------------------------------------------- attachments */
   const addFiles = async (files: File[]) => {

@@ -35,6 +35,8 @@ export interface StoredMessage {
   followups?: string[];
   notices?: string[];
   hadImage?: boolean;
+  /** Facts the tutor saved to memory during this reply. */
+  remembered?: string[];
   /** Files attached to this (user) message, for display. */
   attachments?: { name: string; kind: "image" | "document" }[];
   citations?: { source: string; page?: number; unit?: "slide" }[];
@@ -56,6 +58,18 @@ export interface TutorSession extends BaseRecord {
   docIds: string[];
   autoId: number;
   stepCounter?: number;
+  /** Short recap of this lesson, recalled in later sessions (memory). */
+  summary?: { text: string; messageCount: number; at: number };
+}
+
+export type MemoryKind = "about" | "goal" | "preference" | "struggle";
+
+/** Something the student told the tutor that's worth remembering across sessions. */
+export interface MemoryFact extends BaseRecord {
+  fact: string;
+  kind: MemoryKind;
+  source: "tutor" | "student";
+  sessionId?: string;
 }
 
 export interface HomeworkRecord extends BaseRecord {
@@ -127,6 +141,8 @@ export interface Profile extends BaseRecord {
   voice: { uri?: string; rate: number; autoSpeak: boolean; autoSend: boolean };
   /** How quickly tutor replies unfold on screen. */
   pace?: LessonPace;
+  /** Remember facts and past lessons across sessions (default on). */
+  memory?: boolean;
 }
 
 export interface CollectionMap {
@@ -138,6 +154,7 @@ export interface CollectionMap {
   tasks: StudyTask;
   signals: LearningSignal;
   profile: Profile;
+  memories: MemoryFact;
 }
 
 export type CollectionName = keyof CollectionMap;
@@ -151,6 +168,7 @@ export const COLLECTIONS: CollectionName[] = [
   "tasks",
   "signals",
   "profile",
+  "memories",
 ];
 
 export interface Repository {

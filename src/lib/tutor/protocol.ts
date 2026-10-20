@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { validateBoardActions, type BoardAction } from "../board/schema";
+import { cleanFact } from "../learning/memory";
 
 /* ---------------------------------------------------------------- request */
 
@@ -61,6 +62,13 @@ export const tutorRequestSchema = z.object({
     )
     .max(8)
     .default([]),
+  /** What the tutor remembers (only sent when the student has memory on). */
+  memory: z
+    .object({
+      facts: z.array(z.object({ fact: z.string().max(220), kind: z.enum(["about", "goal", "preference", "struggle"]) })).max(25).default([]),
+      lessons: z.array(z.object({ title: z.string().max(100), summary: z.string().max(500), when: z.string().max(40) })).max(5).default([]),
+    })
+    .optional(),
   /** Optional image attached to the latest user message (legacy single-image field). */
   image: imageDataUrl.optional(),
   /** Images attached to the latest user message. */
@@ -89,7 +97,8 @@ const modelSignal = z.object({
   note: z.string().max(200).optional(),
 });
 const modelCheck = z.object({ t: z.literal("check"), question: z.string().min(1).max(300) });
-const modelLine = z.discriminatedUnion("t", [modelSay, modelBoard, modelFollowups, modelTitle, modelSignal, modelCheck]);
+const modelRemember = z.object({ t: z.literal("remember"), fact: z.string().min(1).max(220), kind: z.enum(["about", "goal", "preference", "struggle"]).catch("about") });
+const modelLine = z.discriminatedUnion("t", [modelSay, modelBoard, modelFollowups, modelTitle, modelSignal, modelCheck, modelRemember]);
 
 /* ------------------------------------------------------ server → browser */
 
@@ -102,6 +111,8 @@ export type TutorEvent =
   | { type: "followups"; items: string[] }
   /** Pause point: the lesson waits until the student says whether they follow. */
   | { type: "check"; question: string }
+  /** A fact about the student worth keeping across sessions (already privacy-filtered). */
+  | { type: "remember"; fact: string; kind: "about" | "goal" | "preference" | "struggle" }
   | { type: "signal"; kind: "struggle" | "misconception" | "mastered"; topic: string; note?: string }
   | { type: "notice"; message: string }
   | { type: "error"; code: string; message: string; hint?: string }
@@ -154,6 +165,10 @@ export function modelObjectToEvents(raw: unknown): TutorEvent[] {
       return [{ type: "signal", kind: line.kind, topic: line.topic, note: line.note }];
     case "check":
       return [{ type: "check", question: line.question }];
+    case "remember": {
+      const fact = cleanFact(line.fact);
+      return fact ? [{ type: "remember", fact, kind: line.kind }] : [];
+    }
   }
 }
 
@@ -169,6 +184,7 @@ export const tutorEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("followups"), items: z.array(z.string()) }),
   z.object({ type: z.literal("check"), question: z.string() }),
+  z.object({ type: z.literal("remember"), fact: z.string().max(220), kind: z.enum(["about", "goal", "preference", "struggle"]) }),
   z.object({ type: z.literal("signal"), kind: z.enum(["struggle", "misconception", "mastered"]), topic: z.string(), note: z.string().optional() }),
   z.object({ type: z.literal("notice"), message: z.string() }),
   z.object({ type: z.literal("error"), code: z.string(), message: z.string(), hint: z.string().optional() }),

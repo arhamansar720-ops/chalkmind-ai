@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { BookOpenText, Check, HelpCircle, Lightbulb, MessageCircleQuestion, Paperclip, Shapes, Sparkles, SquareFunction, Table2, Type, Waypoints, LineChart, Highlighter, ImageIcon } from "lucide-react";
+import { BookOpenText, Brain, Check, HelpCircle, Lightbulb, MessageCircleQuestion, Paperclip, Shapes, Sparkles, SquareFunction, Table2, Type, Waypoints, LineChart, Highlighter, ImageIcon } from "lucide-react";
 import type { BoardAction } from "@/lib/board/schema";
 import type { StoredMessage, StoredStep } from "@/lib/store/types";
 import type { CheckAnswer } from "./TutorWorkspace";
@@ -178,6 +178,17 @@ function AssistantMessage({
             ),
           )}
         </div>
+
+        {m.remembered && m.remembered.length > 0 && (
+          <a
+            href="/app/settings#memory"
+            className="mt-2 inline-flex max-w-full items-center gap-1.5 rounded-full border border-border bg-surface-2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:border-accent hover:text-accent"
+            title="See and edit what the tutor remembers"
+          >
+            <Brain className="size-3 shrink-0" aria-hidden />
+            <span className="truncate">Saved to memory: {m.remembered.join(" · ")}</span>
+          </a>
+        )}
 
         {m.citations && m.citations.length > 0 && (
           <div className="mt-3 rounded-xl border border-border bg-surface-2 px-3 py-2 text-[12px] text-ink-2">

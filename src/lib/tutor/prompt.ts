@@ -28,6 +28,21 @@ const STYLE_RULES: Record<string, string> = {
   "step-by-step": "The student prefers very granular steps, one operation per step.",
 };
 
+function memorySection(req: TutorRequest): string {
+  const m = req.memory;
+  if (!m) return "";
+  const facts = m.facts.length ? m.facts.map((f) => `- ${f.fact}`).join("\n") : "(nothing yet)";
+  const lessons = m.lessons.length ? `\nEarlier lessons with this student:\n${m.lessons.map((l) => `- ${l.when}: "${l.title}" — ${l.summary}`).join("\n")}\n` : "";
+  return `## Memory
+What you remember about this student from earlier sessions:
+${facts}
+${lessons}
+Use this naturally: pitch explanations at their level, build on what they already learned, and revisit what tripped them up. You may say "last time we…" only about the lessons listed above; never invent shared history.
+Only remember what the student actually said or clearly showed, never a guess. Never remember contact details, addresses, passwords, health, family or other personal matters.
+
+`;
+}
+
 const loc = (e: TutorRequest["excerpts"][number]) => (e.page ? `, ${e.unit === "slide" ? "slide" : "p."} ${e.page}` : "");
 
 export function tutorSystemPrompt(req: TutorRequest, isFirstTurn: boolean): string {
@@ -59,11 +74,18 @@ ${isFirstTurn ? `{"t":"title","text":"<3-6 word lesson title>","subject":"<Mathe
 {"t":"check","question":"<short question asking if a specific idea makes sense so far>"}   ← pause point (see below)
 {"t":"followups","items":["<2-3 short follow-ups the STUDENT might ask next, in their voice>"]}   ← last line
 {"t":"signal","kind":"struggle|misconception|mastered","topic":"<topic>","note":"<what you observed>"}   ← optional, only with clear evidence from the student's own words or work
+${req.memory ? `{"t":"remember","fact":"<one short fact about the student, third person>","kind":"about|goal|preference|struggle"}   ← optional, see Memory\n` : ""}
 
 Structure the reply as 2-6 steps: each step is a "say" line followed by an optional "board" line. The student watches each step appear on the board while hearing the "say" text, so keep each "say" short and conversational and let the board carry the detail. In "say" text you may use Markdown and inline math as $...$.
 
 ${CHECK_RULES[req.mode]}
-
+${
+  req.memory
+    ? `
+Memory: whenever the student's message tells you something lasting about them — grade or course, an upcoming test or goal, how they like to learn, something they keep finding hard — add one "remember" line per fact (at most 2) just before "followups", e.g. {"t":"remember","fact":"Is in 10th grade.","kind":"about"} or {"t":"remember","fact":"Has a chemistry test on Friday.","kind":"goal"}. Skip facts already in Memory below.
+`
+    : ""
+}
 ## Board actions
 Never give coordinates — the board lays content out top-to-bottom automatically. All board text (add_text, shape/diagram/table labels) is PLAIN TEXT, not LaTeX: write x², √2, π, θ, → directly. Put real math in add_equation. Optional "place":"right" puts a block beside the previous one. Give an "id" to anything you may refer to later (letters, digits, _ or -).
 - {"type":"add_text","id":"t1","text":"...","style":"title|heading|body|note|label","color":"ink|blue|red|green|orange|purple|gray"}
@@ -87,7 +109,7 @@ Never give coordinates — the board lays content out top-to-bottom automaticall
 - Be honest about uncertainty. Never invent facts, quotes or sources.
 - Keep it age-appropriate and encouraging, without empty praise.
 ${personal.length ? `\n## About this student\n${personal.join("\n")}\n` : ""}${req.subject ? `\nCurrent subject: ${req.subject}.\n` : ""}
-## Current board
+${memorySection(req)}## Current board
 ${board}
 ${excerpts}`;
 }

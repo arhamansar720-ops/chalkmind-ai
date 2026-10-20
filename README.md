@@ -82,8 +82,9 @@ AI_MODEL=qwen3
 | `AI_MAX_OUTPUT_TOKENS` | Output cap per request (default 4096). |
 | `EMBEDDINGS_PROVIDER`, `EMBEDDINGS_MODEL`, `EMBEDDINGS_API_KEY`, `EMBEDDINGS_BASE_URL` | Optional semantic document search (`ollama` → `nomic-embed-text`, or `openai`). Without it, keyword search is used. |
 | `RATE_LIMIT_PER_MINUTE` | AI requests per client per minute, per server instance (default 20). |
-| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Optional cloud sync + magic-link sign-in. |
-| `REQUIRE_AUTH` | `true` = AI routes require a signed-in Supabase user (recommended for public deployments). |
+| `DATABASE_URL` | Optional Postgres for accounts, synced chat history and memory (Render: the External Database URL). Run `npm run db:migrate` once. |
+| `REQUIRE_AUTH` | `true` = the app and every AI route require a signed-in account (needs `DATABASE_URL`; recommended for public deployments). |
+| `SIGNUP_CODE` | Invite code required to create an account. Unset = open sign-up. |
 | `CHALKMIND_DEBUG_AI` | Dev only: logs invalid structured AI replies (may include student input). |
 
 ### Costs — be explicit with students
@@ -106,15 +107,15 @@ Landing page, app shell, Library (browse/rename/delete), Progress (planner, goal
 
 **Default: local-first.** Everything is stored in the browser's IndexedDB (`src/lib/store/local.ts`). No account, nothing leaves the device except the AI requests themselves.
 
-**Optional cloud sync (Supabase).** Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`, then apply the migration:
+**Accounts + sync (Postgres).** Set `DATABASE_URL` and apply the schema once:
 
 ```bash
-# with the Supabase CLI, linked to your project
-supabase db push
-# or paste supabase/migrations/20261019000000_chalkmind_cloud_sync.sql into the SQL editor
+DATABASE_URL=postgres://… npm run db:migrate
 ```
 
-Each collection is a table `cm_<collection>` (`sessions`, `homework`, `materials`, `attempts`, `documents`, `tasks`, `signals`, `profile`) holding the record as JSON. **Row-level security** is enabled and forced on every table: users can only select/insert/update/delete rows where `auth.uid() = user_id`; `anon` has no access. The browser uses only the anon key + the user's session; no service-role key is used anywhere. In Supabase Auth, enable email magic links and add `<your-origin>/app/settings` to the redirect URLs. Students sign in from Settings and can copy their on-device data to their account.
+`render.yaml` is a Render Blueprint for the database (Basic-256mb, Virginia, Postgres 16). Accounts are email + password (scrypt, per-user salt); sessions are random tokens in an `HttpOnly; Secure; SameSite=Lax` cookie and only their SHA-256 is stored; failed sign-ins are throttled per email and per IP in the database; `SIGNUP_CODE` makes sign-up invite-only. Every record lives in one `records` table keyed by `(user_id, collection, id)` and every query is scoped to the session's user, so one account can never read another's data. In the browser each account gets its own IndexedDB cache; writes go to an outbox that syncs to `/api/data` (last write wins on `updatedAt`, deletes are tombstones) and changes from other devices are pulled on load, focus, reconnect and every minute. On first sign-in, data saved on that device before the account existed can be uploaded once. There's no email provider, so there's no self-service password reset.
+
+**Memory.** With memory on (Settings → Memory, default on), the tutor may emit `remember` lines for durable facts the student states (grade, goals, learning preferences, recurring difficulties). The server drops anything that looks like contact details, credentials, addresses or health information before it reaches the browser. Finished lessons get a 2–3 sentence recap (`POST /api/summarize`). Each question sends the ~20 most relevant facts and up to 4 relevant recaps; the prompt forbids inventing shared history. Students can edit or delete any fact, or forget everything.
 
 **Security measures in place**
 
@@ -125,7 +126,7 @@ Each collection is a table `cm_<collection>` (`sessions`, `homework`, `materials
 - Uploads: 15 MB max, type sniffing (`%PDF` / ZIP magic bytes + Office part names, text), decompressed-size cap against zip bombs (DOCX/PPTX are read as XML text only, nothing executed), page cap, clear errors for empty, scanned, encrypted, corrupted or unsupported files. Files are processed in memory and not stored on the server.
 - Logs record error codes only, never request bodies.
 
-**Production checklist:** set `REQUIRE_AUTH=true` with Supabase configured for public deployments; put a shared rate limiter (e.g. Upstash/Redis) in front of `/api/*` if you run multiple instances (the built-in limiter is per-instance memory); configure provider-side spend limits.
+**Production checklist:** set `DATABASE_URL`, `REQUIRE_AUTH=true` and `SIGNUP_CODE` for public deployments; put a shared rate limiter (e.g. Upstash/Redis) in front of `/api/*` if you run multiple instances (the built-in limiter is per-instance memory); configure provider-side spend limits.
 
 ---
 
@@ -152,14 +153,15 @@ src/
     homework/, study/       schemas, prompts, verification, grading
     docs/                   chunking + BM25/hybrid retrieval
     learning/               review recommendations from saved signals
-    store/                  Repository interface; IndexedDB + Supabase adapters; React hooks
+    store/                  Repository interface; IndexedDB + synced (outbox) repositories; React hooks
+    server/                 auth (scrypt, cookie sessions), Postgres records, request guards
     voice/                  VoiceInput/VoiceOutput interfaces + Web Speech implementations
   components/               UI (tutor, homework, study, library, progress, settings, landing, ui kit)
-supabase/migrations/        optional cloud schema with RLS
+db/migrations/              Postgres schema (npm run db:migrate); render.yaml = Render Blueprint
 tests/                      Vitest suites
 ```
 
-**Tutor pipeline.** Student message → `POST /api/tutor` → provider streams NDJSON lines (`title`, `say`, `board`, `followups`, `signal`) → server extracts objects incrementally, validates each line and every board action → streams typed events to the browser → the workspace plays steps in order: show/speak the `say`, then render that step's actions one by one (layout → MathJax → `convertToExcalidrawElements` → `updateScene` with `CaptureUpdateAction.IMMEDIATELY`, so everything the AI draws is undoable) → follow-up chips. Each element carries `customData` (`cm` id, kind, summary, step), so the next request tells the model exactly what is on the board — derived from the live scene, so it stays correct after the student edits, deletes or undoes.
+**Tutor pipeline.** Student message → `POST /api/tutor` → provider streams NDJSON lines (`title`, `say`, `board`, `check`, `remember`, `followups`, `signal`) → server extracts objects incrementally, validates each line and every board action → streams typed events to the browser → the workspace plays steps in order: show/speak the `say`, then render that step's actions one by one (layout → MathJax → `convertToExcalidrawElements` → `updateScene` with `CaptureUpdateAction.IMMEDIATELY`, so everything the AI draws is undoable) → follow-up chips. Each element carries `customData` (`cm` id, kind, summary, step), so the next request tells the model exactly what is on the board — derived from the live scene, so it stays correct after the student edits, deletes or undoes.
 
 **Voice is modular.** `VoiceInput`/`VoiceOutput` interfaces (`src/lib/voice/types.ts`) are implemented with the browser Web Speech API. This is turn-based recognition and on-device TTS — it is *not* a low-latency full-duplex voice model; a real-time provider can be added behind the same interfaces.
 
@@ -169,14 +171,16 @@ tests/                      Vitest suites
 
 ## Tests and checks performed
 
-`npm run check` passes: ESLint clean, TypeScript clean, **92 Vitest tests**:
+`npm run check` passes: ESLint clean, TypeScript clean, **118 Vitest tests** (7 of them need `TEST_DATABASE_URL`):
 
 - board action validation (all types, tolerance rules, safe expression grammar, limits) and the layout engine
 - tutor protocol parsing (chunked NDJSON, fences, truncation, malicious actions dropped server- and client-side)
 - provider adapters with mocked streams (OpenAI-compatible, Anthropic), vision routing, error mapping, missing credentials, config never exposing secrets
 - API routes: not-configured → 503 setup error, malformed/oversized → 400/413, validated streaming, provider failure → error event, `REQUIRE_AUTH` → 401 without calling the model, rate limiting, document upload edge cases (empty, unsupported, corrupted PDF)
 - homework verification (pass, fail, unverifiable; sandboxed math blocks `import`/`evaluate`/…), quiz grading (MCQ, AI-graded, pending, clamping), study schema normalization
-- persistence: IndexedDB repository round-trip incl. board state; cloud repository scopes every query to the signed-in user
+- persistence: IndexedDB repository round-trip incl. board state; sync engine (push, pull, local edits win, outbox survives reload, guest import)
+- accounts against a real Postgres (`TEST_DATABASE_URL=… npm test`): sign-up/in/out, hashes only, invite code, throttling, cross-site block, per-user isolation, last-write-wins, tombstones, `REQUIRE_AUTH` gating
+- memory: privacy filter, de-duplication, cap, relevance selection, prompt inclusion only when on
 - session context building, board index derivation, retrieval (chunking, BM25, hybrid), review recommendations
 
 `npm run build` succeeds. Manually verified in the browser against a real model (Groq `openai/gpt-oss-120b`): tutor lessons with equations, graphs and diagrams; contextual follow-ups that highlight earlier steps; session save/resume; clear + undo; homework (hint-first, verified answer); practice exam with AI grading; flashcards with confidence; library; progress; settings; desktop and phone layouts; light/dark.
@@ -184,8 +188,8 @@ tests/                      Vitest suites
 ## Known limitations / not yet done
 
 - **Voice was not tested with a physical microphone** in this environment; the code paths, permission errors and fallbacks are implemented per the Web Speech API. Browser speech recognition availability varies (Chrome/Edge/Safari; not Firefox).
-- **Cloud sync** (Supabase adapter, RLS migration, magic-link sign-in) is implemented and unit-tested with a fake client but was not run against a live Supabase project.
 - Scanned (image-only) PDFs aren't OCR'd; users are told to use the Homework Solver's image upload instead.
-- Quiz attempts and learning signals are per device unless cloud sync is on.
+- Without `DATABASE_URL`, everything (including memory) is per device.
+- No password reset by email (no email provider).
 - The built-in rate limiter is per server instance (see production checklist).
 - Board layout is a top-to-bottom lesson column; the tutor can't place items at arbitrary positions (by design — models are unreliable with coordinates).

@@ -1,0 +1,10 @@
+# Render Blueprint: the Postgres database behind Chalkmind accounts, chat
+# history and memory. The app itself runs on Vercel and connects with the
+# database's External URL (DATABASE_URL), so there's no Render web service.
+databases:
+  - name: chalkmind-db
+    databaseName: chalkmind
+    user: chalkmind
+    plan: basic-256mb
+    region: virginia # closest Render region to Vercel's default (iad1)
+    postgresMajorVersion: "16"

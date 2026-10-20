@@ -1,16 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { Cloud, Cpu, Download, HardDrive, Mic, Trash2, User, Volume2 } from "lucide-react";
+import { Brain, Cloud, Cpu, Download, HardDrive, Mic, Pencil, Trash2, User, Volume2 } from "lucide-react";
 import { useHealth } from "@/lib/client/health";
 import { useProfile } from "@/lib/client/profile";
 import { store, useCollection } from "@/lib/store";
-import { COLLECTIONS, type Profile } from "@/lib/store/types";
+import { COLLECTIONS, type MemoryFact, type Profile } from "@/lib/store/types";
+import { cleanFact } from "@/lib/learning/memory";
 import { downloadText, relativeTime } from "@/lib/utils";
 import { useVoiceOutput } from "@/lib/voice/hooks";
 import { useAuth } from "@/components/shell/AuthProvider";
 import { setTheme, useTheme } from "@/components/ThemeToggle";
-import { Alert, Badge, Button, Card, ConfirmDialog, Field, Input, PageHeader, Segmented, Select } from "@/components/ui";
+import { Alert, Badge, Button, Card, ConfirmDialog, Field, IconButton, Input, PageHeader, Segmented, Select } from "@/components/ui";
 import { LESSON_PACES } from "@/lib/tutor/pace";
 
 const STYLES: { value: Profile["style"]; label: string }[] = [
@@ -139,6 +140,8 @@ export function Settings() {
             )}
           </div>
         </Section>
+
+        <MemorySection enabled={profile.memory !== false} onToggle={(on) => void update({ memory: on })} />
 
         <Section icon={Volume2} title="Voice">
           {!voice.supported && <Alert tone="warning">This browser doesn&apos;t support speech output. Voice replies are unavailable; everything works by text.</Alert>}
@@ -310,5 +313,107 @@ function Section({ icon: Icon, title, children }: { icon: typeof User; title: st
       </h2>
       {children}
     </Card>
+  );
+}
+
+/** Event-handler timestamps (kept out of component bodies for the React Compiler). */
+const now = () => Date.now();
+
+const KIND_LABEL: Record<MemoryFact["kind"], string> = { about: "About you", goal: "Goal", preference: "How you learn", struggle: "Working on" };
+
+function MemorySection({ enabled, onToggle }: { enabled: boolean; onToggle: (on: boolean) => void }) {
+  const { items: facts } = useCollection("memories");
+  const { items: sessions } = useCollection("sessions");
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [confirm, setConfirm] = useState(false);
+  const recaps = sessions.filter((s) => s.summary?.text).length;
+
+  const save = async (f: MemoryFact) => {
+    const text = cleanFact(draft);
+    setEditing(null);
+    if (text && text !== f.fact) await store.put("memories", { ...f, fact: text, title: text, source: "student", updatedAt: now() });
+  };
+  const forgetAll = async () => {
+    await store.clear("memories");
+    for (const s of sessions) if (s.summary) await store.put("sessions", { ...s, summary: undefined });
+    setConfirm(false);
+  };
+
+  return (
+    <div id="memory" className="scroll-mt-6">
+      <Section icon={Brain} title="Memory">
+        <label className="flex items-start gap-3 text-[14px]">
+          <input type="checkbox" checked={enabled} onChange={(e) => onToggle(e.target.checked)} className="mt-0.5 size-4 accent-[var(--accent)]" />
+          <span>
+            Let the tutor remember me
+            <span className="block text-[12.5px] text-muted">
+              It keeps short facts you tell it (your grade, goals, how you like to learn, what you find hard) and a recap of each lesson, and uses them to pick up where you left
+              off. Contact details, passwords and health information are never kept.
+            </span>
+          </span>
+        </label>
+        {facts.length > 0 ? (
+          <ul className="mt-4 flex flex-col divide-y divide-border rounded-xl border border-border">
+            {facts.map((f) => (
+              <li key={f.id} className="flex items-start gap-3 px-3 py-2.5">
+                <span className="mt-0.5 w-[92px] shrink-0 text-[11px] font-medium uppercase tracking-wide text-muted">{KIND_LABEL[f.kind]}</span>
+                {editing === f.id ? (
+                  <form
+                    className="flex min-w-0 flex-1 gap-2"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      void save(f);
+                    }}
+                  >
+                    <Input autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} maxLength={200} aria-label="Edit memory" className="h-8 flex-1" />
+                    <Button size="sm" type="submit">
+                      Save
+                    </Button>
+                  </form>
+                ) : (
+                  <>
+                    <span className="min-w-0 flex-1 text-[13.5px] text-ink">{f.fact}</span>
+                    <IconButton
+                      size="sm"
+                      label={`Edit: ${f.fact}`}
+                      onClick={() => {
+                        setDraft(f.fact);
+                        setEditing(f.id);
+                      }}
+                    >
+                      <Pencil className="size-3.5" />
+                    </IconButton>
+                    <IconButton size="sm" label={`Forget: ${f.fact}`} onClick={() => void store.delete("memories", f.id)}>
+                      <Trash2 className="size-3.5" />
+                    </IconButton>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-3 text-[13px] text-muted">{enabled ? "Nothing remembered yet. Tell the tutor about yourself and it will keep what's useful." : "Memory is off."}</p>
+        )}
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <p className="text-[12.5px] text-muted">
+            {recaps} lesson recap{recaps === 1 ? "" : "s"} saved.
+          </p>
+          {(facts.length > 0 || recaps > 0) && (
+            <Button size="sm" variant="ghost" className="text-danger hover:bg-danger-soft hover:text-danger" onClick={() => setConfirm(true)}>
+              Forget everything
+            </Button>
+          )}
+        </div>
+      </Section>
+      <ConfirmDialog
+        open={confirm}
+        title="Forget everything the tutor remembers?"
+        body="All remembered facts and lesson recaps will be deleted. Your chats themselves are kept."
+        confirmLabel="Forget everything"
+        onConfirm={() => void forgetAll()}
+        onCancel={() => setConfirm(false)}
+      />
+    </div>
   );
 }

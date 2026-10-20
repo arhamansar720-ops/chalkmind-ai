@@ -7,7 +7,8 @@ import { COLLECTIONS, type CollectionMap, type CollectionName, type Repository }
  * the student isn't signed in.
  */
 const DB_NAME = "chalkmind";
-const DB_VERSION = 1;
+// 2: adds the "memories" store (the upgrade creates any missing stores).
+const DB_VERSION = 2;
 
 export function createLocalRepository(dbName = DB_NAME): Repository {
   let dbPromise: Promise<IDBPDatabase> | null = null;
