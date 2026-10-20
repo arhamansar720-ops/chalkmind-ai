@@ -23,7 +23,7 @@ export function createSession(id: string, now = Date.now()): TutorSession {
  * here?" have the context without resending the whole board.
  */
 export function assistantContextText(msg: Pick<StoredMessage, "steps" | "content">, drawn: RegisteredItem[] | BoardItem[] = []): string {
-  const said = (msg.steps ?? []).map((s) => s.say).filter(Boolean).join("\n\n") || msg.content;
+  const said = (msg.steps ?? []).map((s) => s.say || s.check?.question || "").filter(Boolean).join("\n\n") || msg.content;
   if (drawn.length === 0) return said;
   const list = drawn
     .slice(0, 16)

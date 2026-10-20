@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { BookOpenText, Lightbulb, Shapes, Sparkles, SquareFunction, Table2, Type, Waypoints, LineChart, Highlighter, ImageIcon } from "lucide-react";
+import { BookOpenText, Check, HelpCircle, Lightbulb, MessageCircleQuestion, Shapes, Sparkles, SquareFunction, Table2, Type, Waypoints, LineChart, Highlighter, ImageIcon } from "lucide-react";
 import type { BoardAction } from "@/lib/board/schema";
-import type { StoredMessage } from "@/lib/store/types";
+import type { StoredMessage, StoredStep } from "@/lib/store/types";
+import type { CheckAnswer } from "./TutorWorkspace";
 import { Markdown } from "@/components/Markdown";
 import { ErrorNotice } from "@/components/SetupNotice";
 import { cn } from "@/lib/utils";
@@ -33,6 +34,7 @@ export function MessageList({
   onFollowUp,
   onShowStep,
   onRetry,
+  onCheck,
   className,
   emptyState,
   active = true,
@@ -43,6 +45,8 @@ export function MessageList({
   onFollowUp: (text: string) => void;
   onShowStep: (step: number) => void;
   onRetry: () => void;
+  /** Set while the lesson is paused on a check-in. */
+  onCheck?: (a: CheckAnswer) => void;
   className?: string;
   emptyState?: React.ReactNode;
   /** Re-scroll to the latest message when the list becomes visible (mobile tabs). */
@@ -82,6 +86,7 @@ export function MessageList({
                 onFollowUp={onFollowUp}
                 onShowStep={onShowStep}
                 onRetry={onRetry}
+                onCheck={streamingId === m.id ? onCheck : undefined}
               />
             )}
           </li>
@@ -100,8 +105,10 @@ function AssistantMessage({
   onFollowUp,
   onShowStep,
   onRetry,
+  onCheck,
 }: {
   message: StoredMessage;
+  onCheck?: (a: CheckAnswer) => void;
   isLast: boolean;
   streaming: boolean;
   status: "idle" | "thinking" | "streaming";
@@ -129,32 +136,36 @@ function AssistantMessage({
         )}
         {steps.length === 0 && !streaming && !m.error && m.content && <Markdown>{m.content}</Markdown>}
         <div className="flex flex-col gap-3">
-          {steps.map((s, i) => (
-            <div key={i} className="animate-fade-up">
-              <Markdown className="text-[14.5px]">{s.say}</Markdown>
-              {s.actions.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => s.boardStep !== undefined && onShowStep(s.boardStep)}
-                  disabled={s.boardStep === undefined}
-                  className="mt-1.5 inline-flex flex-wrap items-center gap-1.5 rounded-full border border-border bg-surface-2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:border-accent hover:text-accent disabled:pointer-events-none"
-                  title="Show on board"
-                >
-                  {summarizeActions(s.actions).map(([type, n]) => {
-                    const meta = ACTION_META[type];
-                    const Icon = meta.icon;
-                    return (
-                      <span key={type} className="inline-flex items-center gap-1">
-                        <Icon className="size-3" aria-hidden />
-                        {n > 1 ? `${n} ${meta.label}s` : meta.label}
-                      </span>
-                    );
-                  })}
-                  <span aria-hidden>· show</span>
-                </button>
-              )}
-            </div>
-          ))}
+          {steps.map((s, i) =>
+            s.check ? (
+              <CheckIn key={i} check={s.check} onCheck={onCheck} />
+            ) : (
+              <div key={i} className="animate-fade-up">
+                <Markdown className="text-[14.5px]">{s.say}</Markdown>
+                {s.actions.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => s.boardStep !== undefined && onShowStep(s.boardStep)}
+                    disabled={s.boardStep === undefined}
+                    className="mt-1.5 inline-flex flex-wrap items-center gap-1.5 rounded-full border border-border bg-surface-2 px-2.5 py-1 text-[11.5px] text-muted transition-colors hover:border-accent hover:text-accent disabled:pointer-events-none"
+                    title="Show on board"
+                  >
+                    {summarizeActions(s.actions).map(([type, n]) => {
+                      const meta = ACTION_META[type];
+                      const Icon = meta.icon;
+                      return (
+                        <span key={type} className="inline-flex items-center gap-1">
+                          <Icon className="size-3" aria-hidden />
+                          {n > 1 ? `${n} ${meta.label}s` : meta.label}
+                        </span>
+                      );
+                    })}
+                    <span aria-hidden>· show</span>
+                  </button>
+                )}
+              </div>
+            ),
+          )}
         </div>
 
         {m.citations && m.citations.length > 0 && (
@@ -211,6 +222,45 @@ function AssistantMessage({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function CheckIn({ check, onCheck }: { check: NonNullable<StoredStep["check"]>; onCheck?: (a: CheckAnswer) => void }) {
+  const waiting = !check.answer && onCheck;
+  return (
+    <div className={cn("animate-fade-up rounded-2xl border px-3.5 py-3", waiting ? "border-accent bg-accent-soft" : "border-border bg-surface-2")}>
+      <p className="flex items-start gap-2 text-[14px] font-medium text-ink">
+        <MessageCircleQuestion className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
+        <span>{check.question}</span>
+      </p>
+      {waiting ? (
+        <>
+          <div className="mt-2.5 flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              onClick={() => onCheck({ kind: "yes" })}
+              className="inline-flex h-8 items-center gap-1.5 rounded-full bg-ink px-3.5 text-[13px] font-medium text-bg transition-opacity hover:opacity-90"
+            >
+              <Check className="size-3.5" /> Got it, keep going
+            </button>
+            <button
+              type="button"
+              onClick={() => onCheck({ kind: "no" })}
+              className="inline-flex h-8 items-center gap-1.5 rounded-full border border-border bg-surface px-3.5 text-[13px] font-medium text-ink-2 transition-colors hover:border-accent hover:text-ink"
+            >
+              <HelpCircle className="size-3.5" /> Not quite
+            </button>
+          </div>
+          <p className="mt-2 text-[12px] text-muted">The lesson is paused. You can also type or say what&apos;s confusing.</p>
+        </>
+      ) : (
+        check.answer && (
+          <p className="mt-1 pl-6 text-[12px] text-muted">
+            {check.answer === "yes" ? "You said you've got it." : check.answer === "no" ? "You asked for another explanation." : "You replied below."}
+          </p>
+        )
+      )}
     </div>
   );
 }

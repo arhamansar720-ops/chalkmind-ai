@@ -70,7 +70,8 @@ const modelSignal = z.object({
   topic: z.string().min(1).max(80),
   note: z.string().max(200).optional(),
 });
-const modelLine = z.discriminatedUnion("t", [modelSay, modelBoard, modelFollowups, modelTitle, modelSignal]);
+const modelCheck = z.object({ t: z.literal("check"), question: z.string().min(1).max(300) });
+const modelLine = z.discriminatedUnion("t", [modelSay, modelBoard, modelFollowups, modelTitle, modelSignal, modelCheck]);
 
 /* ------------------------------------------------------ server → browser */
 
@@ -81,6 +82,8 @@ export type TutorEvent =
   | { type: "say"; text: string }
   | { type: "board"; actions: BoardAction[]; rejected: { type: string; reason: string }[] }
   | { type: "followups"; items: string[] }
+  /** Pause point: the lesson waits until the student says whether they follow. */
+  | { type: "check"; question: string }
   | { type: "signal"; kind: "struggle" | "misconception" | "mastered"; topic: string; note?: string }
   | { type: "notice"; message: string }
   | { type: "error"; code: string; message: string; hint?: string }
@@ -131,6 +134,8 @@ export function modelObjectToEvents(raw: unknown): TutorEvent[] {
       return [{ type: "title", title: line.text, subject: line.subject }];
     case "signal":
       return [{ type: "signal", kind: line.kind, topic: line.topic, note: line.note }];
+    case "check":
+      return [{ type: "check", question: line.question }];
   }
 }
 
@@ -145,6 +150,7 @@ export const tutorEventSchema = z.discriminatedUnion("type", [
     rejected: z.array(z.object({ type: z.string(), reason: z.string() })),
   }),
   z.object({ type: z.literal("followups"), items: z.array(z.string()) }),
+  z.object({ type: z.literal("check"), question: z.string() }),
   z.object({ type: z.literal("signal"), kind: z.enum(["struggle", "misconception", "mastered"]), topic: z.string(), note: z.string().optional() }),
   z.object({ type: z.literal("notice"), message: z.string() }),
   z.object({ type: z.literal("error"), code: z.string(), message: z.string(), hint: z.string().optional() }),

@@ -37,6 +37,9 @@ describe("modelObjectToEvents", () => {
     expect(modelObjectToEvents({ t: "say", text: "Hello" })).toEqual([{ type: "say", text: "Hello" }]);
     expect(modelObjectToEvents({ t: "followups", items: ["Why?"] })).toEqual([{ type: "followups", items: ["Why?"] }]);
     expect(modelObjectToEvents({ t: "title", text: "Fractions", subject: "Mathematics" })).toEqual([{ type: "title", title: "Fractions", subject: "Mathematics" }]);
+    expect(modelObjectToEvents({ t: "check", question: "Does that step make sense?" })).toEqual([{ type: "check", question: "Does that step make sense?" }]);
+    expect(modelObjectToEvents({ t: "check", question: "" })).toEqual([{ type: "notice", message: expect.any(String) }]);
+    expect(parseTutorEvent(JSON.stringify({ type: "check", question: "Following so far?" }))).toEqual({ type: "check", question: "Following so far?" });
   });
 
   it("validates board actions and reports rejects", () => {

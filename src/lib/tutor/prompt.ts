@@ -11,6 +11,15 @@ const MODE_RULES: Record<TutorRequest["mode"], string> = {
     "SOCRATIC MODE: guide with short questions. Ask one question at a time and wait for the student's reply. Confirm or gently correct what they say.",
 };
 
+const CHECK_RULES: Record<TutorRequest["mode"], string> = {
+  explain:
+    'Check-ins: when the reply has 3 or more steps, add exactly one "check" line right after the key step, before the remaining steps, e.g. {"t":"check","question":"Does it make sense why we subtract 3 from both sides?"}. Never put it first or last. The lesson pauses there until the student answers; if they say they follow, the remaining steps play, so write them as if the student said yes. Name the specific idea, not just "any questions?".',
+  simpler:
+    'Check-ins: when the reply has 3 or more steps, add exactly one "check" line right after the key step, before the remaining steps. Never put it first or last. The lesson pauses there until the student answers; write the remaining steps as if they said they follow. Ask about one specific idea, in plain words.',
+  hint: 'Do not use "check" lines in hint mode — end by asking the student to try the next step.',
+  socratic: 'Do not use "check" lines in Socratic mode — your questions already do that.',
+};
+
 const STYLE_RULES: Record<string, string> = {
   balanced: "",
   concise: "The student prefers concise explanations: fewer, shorter steps.",
@@ -47,10 +56,13 @@ export function tutorSystemPrompt(req: TutorRequest, isFirstTurn: boolean): stri
 Reply ONLY with JSON objects, one per line (NDJSON). No prose outside JSON, no code fences. Line types:
 ${isFirstTurn ? `{"t":"title","text":"<3-6 word lesson title>","subject":"<Mathematics|Physics|Chemistry|Biology|History|English|Geography|Computer Science|Economics|General>"}   ← first line, this turn only\n` : ""}{"t":"say","text":"<1-3 short sentences spoken to the student>"}
 {"t":"board","actions":[ ...board actions drawn while you say the previous line... ]}
+{"t":"check","question":"<short question asking if a specific idea makes sense so far>"}   ← pause point (see below)
 {"t":"followups","items":["<2-3 short follow-ups the STUDENT might ask next, in their voice>"]}   ← last line
 {"t":"signal","kind":"struggle|misconception|mastered","topic":"<topic>","note":"<what you observed>"}   ← optional, only with clear evidence from the student's own words or work
 
 Structure the reply as 2-6 steps: each step is a "say" line followed by an optional "board" line. The student watches each step appear on the board while hearing the "say" text, so keep each "say" short and conversational and let the board carry the detail. In "say" text you may use Markdown and inline math as $...$.
+
+${CHECK_RULES[req.mode]}
 
 ## Board actions
 Never give coordinates — the board lays content out top-to-bottom automatically. All board text (add_text, shape/diagram/table labels) is PLAIN TEXT, not LaTeX: write x², √2, π, θ, → directly. Put real math in add_equation. Optional "place":"right" puts a block beside the previous one. Give an "id" to anything you may refer to later (letters, digits, _ or -).

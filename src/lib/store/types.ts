@@ -22,6 +22,8 @@ export interface StoredStep {
   actions: BoardAction[];
   /** Board step number (element customData.cmStep), for "show on board". */
   boardStep?: number;
+  /** A comprehension check-in where the lesson paused, and how the student answered. */
+  check?: { question: string; answer?: "yes" | "no" | "reply" };
 }
 
 export interface StoredMessage {

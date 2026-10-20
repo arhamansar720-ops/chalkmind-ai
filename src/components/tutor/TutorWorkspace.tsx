@@ -42,7 +42,14 @@ interface Turn {
   speech: Promise<void>;
   fast: boolean;
   mute: boolean;
+  /** The student cut the reply short at a check-in; skip whatever is left of it. */
+  stopped: boolean;
+  /** Question to ask once this turn has wrapped up (from a check-in answer). */
+  next?: string;
 }
+
+/** How the student answered a mid-lesson check-in. */
+export type CheckAnswer = { kind: "yes" } | { kind: "no" } | { kind: "reply"; text: string };
 
 export function TutorWorkspace() {
   const params = useSearchParams();
@@ -77,6 +84,9 @@ export function TutorWorkspace() {
   const [boardReady, setBoardReady] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const turnRef = useRef<Turn | null>(null);
+  const checkRef = useRef<((a: CheckAnswer) => void) | null>(null);
+  const [checking, setChecking] = useState(false);
+  const askRef = useRef<(text: string) => Promise<void>>(async () => {});
   const autoIdRef = useRef(0);
   const stepRef = useRef(0);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -175,6 +185,7 @@ export function TutorWorkspace() {
   useEffect(() => () => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     abortRef.current?.abort();
+    checkRef.current?.({ kind: "yes" });
   }, []);
 
   /* ------------------------------------------------------------ asking */
@@ -251,6 +262,7 @@ export function TutorWorkspace() {
         speech: Promise.resolve(),
         fast: false,
         mute: !profile.voice.autoSpeak,
+        stopped: false,
       };
       turnRef.current = turn;
       const controller = new AbortController();
@@ -258,6 +270,7 @@ export function TutorWorkspace() {
       let switchedToBoard = false;
 
       const handle = async (ev: TutorEvent) => {
+        if (turn.stopped) return;
         switch (ev.type) {
           case "thinking":
             setStatus((st) => (st === "idle" ? st : "thinking"));
@@ -332,6 +345,38 @@ export function TutorWorkspace() {
             }
             break;
           }
+          case "check": {
+            // Only explain/simpler lessons pause; skip check-ins once the student hit Stop.
+            if (turn.fast || (s.mode !== "explain" && s.mode !== "simpler")) break;
+            await turn.speech;
+            const lastSay = [...(sessionRef.current?.messages.find((m) => m.id === aId)?.steps ?? [])].reverse().find((st) => st.say)?.say ?? "";
+            updateMessage(aId, (m) => ({ ...m, steps: [...(m.steps ?? []), { say: "", actions: [], check: { question: ev.question } }] }));
+            if (!turn.mute) turn.speech = voiceOut.speak(speakableText(ev.question), { voiceURI: profile.voice.uri, rate: profile.voice.rate });
+            setChecking(true);
+            const answer = await new Promise<CheckAnswer>((resolve) => {
+              checkRef.current = resolve;
+            });
+            checkRef.current = null;
+            setChecking(false);
+            updateMessage(aId, (m) => {
+              const steps = [...(m.steps ?? [])];
+              const i = steps.findLastIndex((st) => st.check && !st.check.answer);
+              if (i >= 0) steps[i] = { ...steps[i], check: { ...steps[i].check!, answer: answer.kind } };
+              return { ...m, steps };
+            });
+            if (answer.kind === "yes") break;
+            // Drop the rest of this reply and take the student's answer as the next question.
+            turn.stopped = true;
+            voiceOut.stop();
+            controller.abort();
+            turn.next =
+              answer.kind === "reply"
+                ? answer.text
+                : lastSay
+                  ? `I don't quite get this part yet: "${lastSay.slice(0, 300).trim()}" Can you explain it a different way?`
+                  : "I don't quite get this part yet. Can you explain it a different way?";
+            break;
+          }
           case "followups":
             updateMessage(aId, (m) => ({ ...m, followups: ev.items }));
             break;
@@ -369,7 +414,9 @@ export function TutorWorkspace() {
         }, controller.signal);
       } catch (err) {
         const e = err instanceof ApiError ? err : new ApiError("unknown", "Something went wrong.");
-        if (e.code === "aborted") {
+        if (e.code === "aborted" && turn.stopped) {
+          // Cut short at a check-in: nothing to report.
+        } else if (e.code === "aborted") {
           updateMessage(aId, (m) => ({ ...m, notices: [...(m.notices ?? []), "Stopped."] }));
         } else {
           updateMessage(aId, (m) => ({ ...m, error: { code: e.code, message: e.message, hint: e.hint } }));
@@ -394,6 +441,7 @@ export function TutorWorkspace() {
       setStreamingId(null);
       abortRef.current = null;
       await persist();
+      if (turn.next) void askRef.current(turn.next);
     },
     [image, mutate, personalization.profile, persist, profile, updateMessage, voiceOut],
   );
@@ -406,14 +454,32 @@ export function TutorWorkspace() {
     void ask(seedQuestion);
   }, [seedQuestion, session, boardReady, aiReady, ask]);
 
+  useEffect(() => {
+    askRef.current = ask;
+  }, [ask]);
+
+  /** Answer a pending check-in, or ask normally when the lesson isn't paused. */
+  const submit = useCallback(
+    (text: string) => {
+      const t = text.trim();
+      if (!t) return;
+      if (checkRef.current) {
+        setInput("");
+        checkRef.current({ kind: "reply", text: t });
+      } else void ask(t);
+    },
+    [ask],
+  );
+  const answerCheck = useCallback((a: CheckAnswer) => checkRef.current?.(a), []);
+
   /* ------------------------------------------------------------- voice */
   const voiceIn = useVoiceInput(
     useCallback(
       (text: string) => {
-        if (profile.voice.autoSend) void ask(text);
+        if (profile.voice.autoSend) submit(text);
         else setInput((v) => (v ? `${v} ${text}` : text));
       },
-      [ask, profile.voice.autoSend],
+      [submit, profile.voice.autoSend],
     ),
   );
   const toggleMic = () => {
@@ -427,6 +493,7 @@ export function TutorWorkspace() {
 
   const stopGenerating = () => {
     if (turnRef.current) turnRef.current.fast = true;
+    checkRef.current?.({ kind: "yes" });
     voiceOut.stop();
     abortRef.current?.abort();
   };
@@ -654,6 +721,7 @@ export function TutorWorkspace() {
                 status={status}
                 onFollowUp={(t) => void ask(t)}
                 onShowStep={showStep}
+                onCheck={checking ? answerCheck : undefined}
                 onRetry={retry}
                 emptyState={emptyState}
                 active={wide || tab === "chat"}
@@ -673,9 +741,9 @@ export function TutorWorkspace() {
           <Composer
             value={input}
             onChange={setInput}
-            onSubmit={() => void ask(input)}
+            onSubmit={() => submit(input)}
             onStop={stopGenerating}
-            busy={busy}
+            busy={busy && !checking}
             disabled={!aiReady}
             disabledReason={healthLoading ? "Connecting…" : "Connect an AI model to start (see setup above)"}
             mode={session.mode}
