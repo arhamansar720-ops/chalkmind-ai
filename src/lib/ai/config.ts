@@ -201,7 +201,7 @@ export function publicConfig(env: Env = process.env) {
         }
       : { configured: false as const, reason: ai.reason, missing: ai.missing },
     embeddings: emb ? { configured: true as const, label: emb.label, model: emb.model } : { configured: false as const },
-    cloudSync: Boolean(env.NEXT_PUBLIC_SUPABASE_URL && env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+    accounts: Boolean(env.DATABASE_URL),
   };
 }
 

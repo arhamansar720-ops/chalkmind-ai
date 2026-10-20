@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const ENV_KEYS = ["AI_PROVIDER", "AI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "REQUIRE_AUTH", "NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "AI_MODEL", "AI_VISION_MODEL"];
+const ENV_KEYS = ["AI_PROVIDER", "AI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "REQUIRE_AUTH", "DATABASE_URL", "SIGNUP_CODE", "AI_MODEL", "AI_VISION_MODEL"];
 let saved: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -141,21 +141,17 @@ describe("POST /api/tutor", () => {
     expect(events.find((e) => e.type === "error")).toMatchObject({ code: "auth" });
   });
 
-  it("requires a valid session token when REQUIRE_AUTH is on", async () => {
+  it("refuses to run open when REQUIRE_AUTH is on but no database is configured", async () => {
     process.env.AI_PROVIDER = "groq";
     process.env.AI_API_KEY = "k";
     process.env.REQUIRE_AUTH = "true";
-    process.env.NEXT_PUBLIC_SUPABASE_URL = "https://proj.supabase.co";
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon";
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url.endsWith("/auth/v1/user")) return new Response("{}", { status: 401 });
-      throw new Error("AI provider must not be called for unauthenticated requests");
+    const fetchMock = vi.fn(async () => {
+      throw new Error("AI provider must not be called");
     });
     vi.stubGlobal("fetch", fetchMock);
     const { POST } = await import("@/app/api/tutor/route");
-    expect((await POST(post(valid))).status).toBe(401);
-    expect((await POST(post(valid, { authorization: "Bearer expired" }))).status).toBe(401);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((await POST(post(valid))).status).toBe(500);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

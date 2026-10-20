@@ -13,20 +13,17 @@ export class ApiError extends Error {
   }
 }
 
-let authToken: string | null = null;
-/** Set by the cloud-sync auth provider so AI routes can verify the user when REQUIRE_AUTH is on. */
-export function setAuthToken(token: string | null) {
-  authToken = token;
+// Signed-in requests are authenticated by the HttpOnly session cookie, which
+// the browser attaches to same-origin fetches automatically.
+function headers(json = true): HeadersInit {
+  return json ? { "Content-Type": "application/json" } : {};
 }
 
-function headers(json = true): HeadersInit {
-  return {
-    ...(json ? { "Content-Type": "application/json" } : {}),
-    ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-  };
-}
+/** Fired when the server says the session is gone, so the app can send the user to sign in. */
+export const UNAUTHORIZED_EVENT = "chalkmind:unauthorized";
 
 async function toApiError(res: Response): Promise<ApiError> {
+  if (res.status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
   const body = (await res.json().catch(() => null)) as { error?: { code?: string; message?: string; hint?: string } } | null;
   return new ApiError(
     body?.error?.code ?? "http_error",

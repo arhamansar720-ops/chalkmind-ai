@@ -6,7 +6,7 @@ import type { CollectionMap, CollectionName, Repository } from "./types";
 
 /**
  * The single data-access point for the UI. Components never talk to
- * IndexedDB or Supabase directly; they call `store.*` or the hooks below,
+ * IndexedDB or the server directly; they call `store.*` or the hooks below,
  * and re-render when a collection changes (in this tab or another).
  */
 
@@ -35,7 +35,12 @@ function emit(name: CollectionName | "*") {
   }
 }
 
-/** Swap storage backends (e.g. after signing in to cloud sync). */
+/** Tell subscribers that collections changed underneath them (e.g. pulled from another device). */
+export function notifyChanged(names: CollectionName[]) {
+  for (const n of names) emit(n);
+}
+
+/** Swap storage backends (e.g. after signing in). */
 export function setRepository(next: Repository) {
   repo = next;
   repoVersion++;

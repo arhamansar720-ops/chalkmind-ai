@@ -3,7 +3,7 @@ import { COLLECTIONS, type CollectionMap, type CollectionName, type Repository }
 
 /**
  * Local-first storage in the browser's IndexedDB. Data never leaves the
- * device. This is the default when cloud sync (Supabase) isn't configured or
+ * device. This is the guest store when accounts aren't configured or
  * the student isn't signed in.
  */
 const DB_NAME = "chalkmind";

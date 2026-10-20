@@ -5,7 +5,6 @@ import { Cloud, Cpu, Download, HardDrive, Mic, Trash2, User, Volume2 } from "luc
 import { useHealth } from "@/lib/client/health";
 import { useProfile } from "@/lib/client/profile";
 import { store, useCollection } from "@/lib/store";
-import { createLocalRepository } from "@/lib/store/local";
 import { COLLECTIONS, type Profile } from "@/lib/store/types";
 import { downloadText, relativeTime } from "@/lib/utils";
 import { useVoiceOutput } from "@/lib/voice/hooks";
@@ -30,8 +29,6 @@ export function Settings() {
   const auth = useAuth();
   const theme = useTheme();
   const [confirm, setConfirm] = useState<"signals" | "all" | null>(null);
-  const [email, setEmail] = useState("");
-  const [authMsg, setAuthMsg] = useState<string | null>(null);
   const [copyMsg, setCopyMsg] = useState<string | null>(null);
 
   const exportAll = async () => {
@@ -45,16 +42,9 @@ export function Settings() {
     setConfirm(null);
   };
 
-  const copyLocalToCloud = async () => {
-    const local = createLocalRepository();
-    let n = 0;
-    for (const c of COLLECTIONS) {
-      for (const rec of await local.list(c)) {
-        await store.put(c, rec as never);
-        n++;
-      }
-    }
-    setCopyMsg(n ? `Copied ${n} item${n > 1 ? "s" : ""} from this device to your account.` : "There was nothing on this device to copy.");
+  const importGuest = async () => {
+    const n = await auth.importGuestData();
+    setCopyMsg(n ? `Uploaded ${n} item${n > 1 ? "s" : ""} from this device to your account.` : "Everything on this device was already in your account.");
   };
 
   return (
@@ -228,48 +218,54 @@ export function Settings() {
         </Section>
 
         <Section icon={Cloud} title="Your data">
-          <p className="text-[13.5px] leading-relaxed text-ink-2">
-            {auth.user ? (
-              <>
-                Synced to your account <span className="font-medium">{auth.user.email}</span>. Only you can read your records.
-              </>
-            ) : (
-              <>Everything is saved in this browser on this device. Clearing site data removes it.</>
-            )}
-          </p>
-          {auth.available && !auth.user && (
-            <form
-              className="mt-3 flex flex-col gap-2 sm:flex-row"
-              onSubmit={async (e) => {
-                e.preventDefault();
-                setAuthMsg(null);
-                try {
-                  await auth.signIn(email.trim());
-                  setAuthMsg("Check your email for a sign-in link.");
-                } catch (err) {
-                  setAuthMsg(err instanceof Error ? err.message : "Couldn't send the link.");
-                }
-              }}
-            >
-              <Input type="email" required aria-label="Email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@school.edu" className="h-10 flex-1" />
-              <Button type="submit" variant="primary">
-                Email me a sign-in link
-              </Button>
-            </form>
-          )}
-          {authMsg && <p className="mt-2 text-[13px] text-muted">{authMsg}</p>}
-          {auth.user && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button size="sm" onClick={() => void copyLocalToCloud()}>
-                Copy this device&apos;s data to my account
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => void auth.signOut()}>
-                Sign out
-              </Button>
-            </div>
+          {auth.user ? (
+            <>
+              <p className="text-[13.5px] leading-relaxed text-ink-2">
+                Signed in as <span className="font-medium">{auth.user.email}</span>. Your chats, whiteboards, study sets, documents and memory sync to your
+                account, so they follow you to any device. Only you can read them.
+              </p>
+              <p className="mt-1.5 text-[12.5px] text-muted" aria-live="polite">
+                {syncLabel(auth.sync)}
+              </p>
+              {auth.guestRecords > 0 && (
+                <div className="mt-3 rounded-xl border border-accent bg-accent-soft p-3 text-[13px]">
+                  <p className="text-ink">
+                    This device has {auth.guestRecords} item{auth.guestRecords > 1 ? "s" : ""} saved from before you signed in.
+                  </p>
+                  <div className="mt-2 flex gap-2">
+                    <Button size="sm" variant="primary" onClick={() => void importGuest()}>
+                      Upload to my account
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={auth.dismissGuestData}>
+                      Not now
+                    </Button>
+                  </div>
+                </div>
+              )}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button size="sm" onClick={auth.syncNow}>
+                  Sync now
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => void auth.signOut()}>
+                  Sign out
+                </Button>
+              </div>
+            </>
+          ) : (
+            <p className="text-[13.5px] leading-relaxed text-ink-2">
+              Everything is saved in this browser on this device. Clearing site data removes it.
+              {auth.available && (
+                <>
+                  {" "}
+                  <a href="/signin?next=/app/settings" className="font-medium text-accent hover:underline">
+                    Sign in
+                  </a>{" "}
+                  to keep it in your account.
+                </>
+              )}
+            </p>
           )}
           {copyMsg && <p className="mt-2 text-[13px] text-muted">{copyMsg}</p>}
-          {!auth.available && <p className="mt-2 text-[12.5px] text-muted">Cloud sync isn&apos;t configured on this deployment (see README → Supabase).</p>}
           <div className="mt-5 flex flex-wrap gap-2 border-t border-border pt-4">
             <Button size="sm" icon={<Download className="size-3.5" />} onClick={() => void exportAll()}>
               Export all data (JSON)
@@ -295,6 +291,15 @@ export function Settings() {
       />
     </div>
   );
+}
+
+function syncLabel(sync: ReturnType<typeof useAuth>["sync"]): string {
+  if (!sync) return "Connecting…";
+  if (sync.state === "syncing") return "Syncing…";
+  if (sync.state === "offline") return `Offline — ${sync.pending} change${sync.pending === 1 ? "" : "s"} will sync when you're back online.`;
+  if (sync.state === "error") return `${sync.message}${sync.pending ? ` ${sync.pending} change${sync.pending === 1 ? "" : "s"} waiting.` : ""}`;
+  const when = sync.lastSync ? `Synced ${new Date(sync.lastSync).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "Synced";
+  return sync.localOnly ? `${when}. ${sync.localOnly} large item${sync.localOnly > 1 ? "s are" : " is"} kept on this device only.` : `${when}.`;
 }
 
 function Section({ icon: Icon, title, children }: { icon: typeof User; title: string; children: React.ReactNode }) {

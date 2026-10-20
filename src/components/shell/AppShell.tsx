@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import { Suspense, useEffect, useState, type ReactNode } from "react";
 import {
   BarChart3,
   BookOpen,
@@ -20,8 +20,9 @@ import { Logo, LogoMark } from "@/components/brand/Logo";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { IconButton } from "@/components/ui";
 import { useCollection } from "@/lib/store";
-import { cn, relativeTime } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { AuthProvider, useAuth } from "./AuthProvider";
+import { RecentChats } from "./RecentChats";
 
 const NAV = [
   { href: "/app/tutor", label: "AI Tutor", icon: MessagesSquare },
@@ -144,7 +145,7 @@ function SidebarContent({ collapsed, onToggle }: { collapsed: boolean; onToggle?
   const { items: profiles } = useCollection("profile");
   const { user, available } = useAuth();
   const name = profiles[0]?.name?.trim();
-  const recent = sessions.slice(0, 5);
+  const recent = sessions;
 
   return (
     <div className="flex h-full flex-col">
@@ -204,22 +205,9 @@ function SidebarContent({ collapsed, onToggle }: { collapsed: boolean; onToggle?
       </nav>
 
       {!collapsed && recent.length > 0 && (
-        <div className="mt-3 min-h-0 flex-1 overflow-y-auto px-3">
-          <p className="eyebrow px-2.5 pb-1.5">Recent sessions</p>
-          <ul className="flex flex-col gap-0.5">
-            {recent.map((s) => (
-              <li key={s.id}>
-                <Link
-                  href={`/app/tutor?s=${s.id}`}
-                  className="group flex flex-col rounded-lg px-2.5 py-1.5 text-[13px] text-ink-2 hover:bg-surface-2 hover:text-ink"
-                >
-                  <span className="truncate">{s.title || "Untitled session"}</span>
-                  <span className="text-[11px] text-muted">{relativeTime(s.updatedAt)}</span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </div>
+        <Suspense fallback={<div className="flex-1" />}>
+          <RecentChats sessions={sessions} />
+        </Suspense>
       )}
       {(collapsed || recent.length === 0) && <div className="flex-1" />}
 
@@ -249,8 +237,8 @@ function SidebarContent({ collapsed, onToggle }: { collapsed: boolean; onToggle?
                 {(name || user?.email || "S").slice(0, 1).toUpperCase()}
               </span>
               <span className="min-w-0">
-                <span className="block truncate text-[13px] font-medium">{name || "Student"}</span>
-                <span className="block truncate text-[11px] text-muted">{user ? "Synced to your account" : available ? "Saved on this device · sign in to sync" : "Saved on this device"}</span>
+                <span className="block truncate text-[13px] font-medium">{name || user?.name || "Student"}</span>
+                <span className="block truncate text-[11px] text-muted">{user ? user.email : available ? "Saved on this device · sign in to sync" : "Saved on this device"}</span>
               </span>
               <Settings className="ml-auto size-4 shrink-0 text-muted" aria-label="Settings" />
             </Link>

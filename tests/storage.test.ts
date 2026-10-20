@@ -1,7 +1,6 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
 import { createLocalRepository } from "@/lib/store/local";
-import { createCloudRepository, tableFor } from "@/lib/store/cloud";
 import type { TutorSession } from "@/lib/store/types";
 import { createSession, historyForRequest, mergeBoardIndex, assistantContextText } from "@/lib/tutor/session";
 import { chunkPages } from "@/lib/docs/chunk";
@@ -42,47 +41,6 @@ describe("local repository (IndexedDB)", () => {
     await repo.put("sessions", s);
     s.title = "mutated after save";
     expect((await repo.get("sessions", "a"))?.title).toBe("New session");
-  });
-});
-
-/** Minimal fake of the Supabase query builder that records filters. */
-function fakeSupabase() {
-  const calls: { table: string; op: string; filters: [string, unknown][]; payload?: unknown }[] = [];
-  const client = {
-    from(table: string) {
-      const call = { table, op: "", filters: [] as [string, unknown][], payload: undefined as unknown };
-      calls.push(call);
-      const builder = {
-        select() { call.op = call.op || "select"; return builder; },
-        delete() { call.op = "delete"; return builder; },
-        upsert(p: unknown) { call.op = "upsert"; call.payload = p; return Promise.resolve({ error: null }); },
-        eq(col: string, v: unknown) { call.filters.push([col, v]); return builder; },
-        order() { return Promise.resolve({ data: [], error: null }); },
-        maybeSingle() { return Promise.resolve({ data: null, error: null }); },
-        then(resolve: (v: { error: null }) => void) { resolve({ error: null }); },
-      };
-      return builder;
-    },
-  };
-  return { client, calls };
-}
-
-describe("cloud repository (authorization)", () => {
-  it("scopes every read and write to the signed-in user", async () => {
-    const { client, calls } = fakeSupabase();
-    const repo = createCloudRepository(client as never, "user-123");
-    await repo.list("sessions");
-    await repo.get("homework", "h1");
-    await repo.put("materials", { id: "m1", title: "Deck", createdAt: 1, updatedAt: 2 } as never);
-    await repo.delete("documents", "d1");
-    await repo.clear("signals");
-    for (const c of calls) {
-      if (c.op === "upsert") expect((c.payload as { user_id: string }).user_id).toBe("user-123");
-      else expect(c.filters).toContainEqual(["user_id", "user-123"]);
-      expect(c.table).toMatch(/^cm_/);
-    }
-    expect(calls).toHaveLength(5);
-    expect(tableFor("sessions")).toBe("cm_sessions");
   });
 });
 
