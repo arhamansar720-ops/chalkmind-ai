@@ -2,6 +2,7 @@ import type { BoardAction } from "../board/schema";
 import type { TutorMode } from "../tutor/protocol";
 import type { HomeworkSolution, Verification } from "../homework/schema";
 import type { StudyContent } from "../study/schema";
+import type { LessonPace } from "../tutor/pace";
 
 export interface BaseRecord {
   id: string;
@@ -120,6 +121,8 @@ export interface Profile extends BaseRecord {
   style: "balanced" | "concise" | "detailed" | "visual" | "step-by-step";
   personalize: boolean;
   voice: { uri?: string; rate: number; autoSpeak: boolean; autoSend: boolean };
+  /** How quickly tutor replies unfold on screen. */
+  pace?: LessonPace;
 }
 
 export interface CollectionMap {
@@ -163,4 +166,5 @@ export const DEFAULT_PROFILE: Profile = {
   style: "balanced",
   personalize: true,
   voice: { rate: 1, autoSpeak: false, autoSend: true },
+  pace: "normal",
 };

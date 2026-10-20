@@ -15,6 +15,8 @@ import type { TutorEvent, TutorMode, TutorRequest } from "@/lib/tutor/protocol";
 import { assistantContextText, createSession, historyForRequest, mergeBoardIndex, STARTER_PROMPTS } from "@/lib/tutor/session";
 import { cn, speakableText } from "@/lib/utils";
 import { useVoiceInput, useVoiceOutput } from "@/lib/voice/hooks";
+import { Blur, Reveal } from "@/components/Motion";
+import { boardDelay, readingDelay } from "@/lib/tutor/pace";
 import { Badge, Button, ConfirmDialog, IconButton, Spinner } from "@/components/ui";
 import { SetupNotice } from "@/components/SetupNotice";
 import { Board } from "./Board";
@@ -22,7 +24,7 @@ import { Composer } from "./Composer";
 import { MessageList } from "./MessageList";
 import { SourcesPanel } from "./SourcesPanel";
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 function prefersReducedMotion() {
   return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -189,6 +191,7 @@ export function TutorWorkspace() {
       busyRef.current = true;
       voiceOut.stop();
       const animate = !prefersReducedMotion();
+      const pace = profile.pace ?? "normal";
 
       const userMsg: StoredMessage = { id: newId("m"), role: "user", content: text, hadImage: Boolean(image), createdAt: Date.now() };
       const aId = newId("m");
@@ -267,8 +270,9 @@ export function TutorWorkspace() {
             if (!turn.fast) await turn.speech;
             if (!turn.mute && !turn.fast) {
               turn.speech = voiceOut.speak(speakableText(ev.text), { voiceURI: profile.voice.uri, rate: profile.voice.rate });
-            } else if (animate && !turn.fast) {
-              await sleep(250);
+            } else if (!turn.fast) {
+              // Voice off: hold the next step back until this one has been read.
+              turn.speech = sleep(readingDelay(ev.text, pace));
             }
             updateMessage(aId, (m) => ({ ...m, steps: [...(m.steps ?? []), { say: ev.text, actions: [] }] }));
             break;
@@ -324,7 +328,7 @@ export function TutorWorkspace() {
                 updateMessage(aId, (m) => ({ ...m, notices: [...(m.notices ?? []), `Couldn't draw a ${action.type.replace("add_", "")} on the board.`] }));
               }
               setBoardEmpty(h.api.getSceneElements().length === 0);
-              if (animate && !turn.fast) await sleep(380);
+              if (!turn.fast) await sleep(animate ? boardDelay(pace) : boardDelay(pace) / 2);
             }
             break;
           }
@@ -492,20 +496,23 @@ export function TutorWorkspace() {
       <div className="flex flex-col items-start gap-4 pb-4">
         <div>
           <p className="eyebrow mb-2">New session</p>
-          <h2 className="text-xl font-semibold tracking-[-0.025em]">What do you want to understand?</h2>
+          <h2 className="text-xl font-semibold tracking-[-0.025em]">
+            <Blur text="What do you want to understand?" delay={60} />
+          </h2>
           <p className="mt-1.5 text-sm leading-relaxed text-muted">Type or speak a question. The tutor explains out loud and works through it on the board, step by step. Ask follow-ups any time.</p>
         </div>
         <div className="flex flex-col gap-1.5 self-stretch">
-          {STARTER_PROMPTS.map((p) => (
-            <button
-              key={p}
-              type="button"
-              disabled={!aiReady}
-              onClick={() => void ask(p)}
-              className="rounded-xl border border-border bg-surface px-3.5 py-2.5 text-left text-[13.5px] text-ink-2 shadow-sm transition-colors hover:border-accent hover:text-ink disabled:opacity-50"
-            >
-              {p}
-            </button>
+          {STARTER_PROMPTS.map((p, i) => (
+            <Reveal key={p} delay={0.15 + i * 0.07} distance={14}>
+              <button
+                type="button"
+                disabled={!aiReady}
+                onClick={() => void ask(p)}
+                className="w-full rounded-xl border border-border bg-surface px-3.5 py-2.5 text-left text-[13.5px] text-ink-2 shadow-sm transition-colors hover:border-accent hover:text-ink disabled:opacity-50"
+              >
+                {p}
+              </button>
+            </Reveal>
           ))}
         </div>
       </div>

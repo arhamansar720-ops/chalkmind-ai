@@ -12,6 +12,7 @@ import { useVoiceOutput } from "@/lib/voice/hooks";
 import { useAuth } from "@/components/shell/AuthProvider";
 import { setTheme, useTheme } from "@/components/ThemeToggle";
 import { Alert, Badge, Button, Card, ConfirmDialog, Field, Input, PageHeader, Segmented, Select } from "@/components/ui";
+import { LESSON_PACES } from "@/lib/tutor/pace";
 
 const STYLES: { value: Profile["style"]; label: string }[] = [
   { value: "balanced", label: "Balanced" },
@@ -85,6 +86,26 @@ export function Settings() {
                 </button>
               ))}
             </div>
+          </div>
+          <div className="mt-4">
+            <p className="mb-2 text-[13px] font-medium text-ink-2">Lesson pace</p>
+            <div className="flex flex-wrap gap-1.5">
+              {LESSON_PACES.map((p) => {
+                const on = (profile.pace ?? "normal") === p.value;
+                return (
+                  <button
+                    key={p.value}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => void update({ pace: p.value })}
+                    className={`h-8 rounded-full border px-3 text-[13px] font-medium ${on ? "border-accent bg-accent-soft text-accent" : "border-border text-ink-2 hover:border-border-strong"}`}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="mt-1.5 text-[12px] text-muted">How long each step stays up before the next one appears and the board keeps drawing. With voice on, the tutor also waits for each spoken step.</p>
           </div>
         </Section>
 

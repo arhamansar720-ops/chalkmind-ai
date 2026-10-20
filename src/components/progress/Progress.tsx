@@ -10,6 +10,7 @@ import { newId, store, useCollection } from "@/lib/store";
 import { now, relativeTime } from "@/lib/utils";
 import { Badge, Button, Card, PageHeader, Spinner } from "@/components/ui";
 import { Planner } from "./Planner";
+import { Count } from "@/components/Motion";
 
 export function Progress() {
   const router = useRouter();
@@ -257,7 +258,9 @@ function Stat({ label, value, detail }: { label: string; value: number; detail: 
   return (
     <Card className="p-4">
       <p className="text-[12.5px] text-muted">{label}</p>
-      <p className="mt-1 text-[28px] font-semibold leading-none tracking-[-0.04em]">{value}</p>
+      <p className="mt-1 text-[28px] font-semibold leading-none tracking-[-0.04em]">
+        <Count to={value} />
+      </p>
       <p className="mt-1.5 text-[12px] text-muted">{detail}</p>
     </Card>
   );
