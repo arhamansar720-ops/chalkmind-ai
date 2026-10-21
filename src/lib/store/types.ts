@@ -132,6 +132,12 @@ export interface Profile extends BaseRecord {
   voice: { uri?: string; rate: number; autoSpeak: boolean; autoSend: boolean };
   /** How quickly tutor replies unfold on screen. */
   pace?: LessonPace;
+  /** Custom instructions: what the tutor should know about the student. */
+  aboutMe?: string;
+  /** Custom instructions: how the student wants the tutor to talk to them. */
+  responseStyle?: string;
+  /** Draw board content stroke by stroke (default on, even with reduced motion). */
+  drawAnimation?: boolean;
 }
 
 export interface CollectionMap {

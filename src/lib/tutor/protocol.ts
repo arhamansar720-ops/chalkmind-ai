@@ -47,7 +47,11 @@ export const tutorRequestSchema = z.object({
     .object({
       style: z.enum(["balanced", "concise", "detailed", "visual", "step-by-step"]).default("balanced"),
       level: z.string().max(40).optional(),
+      name: z.string().max(60).optional(),
       reviewTopics: z.array(z.string().max(80)).max(8).default([]),
+      /** The student's custom instructions, written by them. */
+      aboutMe: z.string().max(1500).optional(),
+      responseStyle: z.string().max(1500).optional(),
     })
     .optional(),
   excerpts: z

@@ -40,6 +40,16 @@ export function tutorSystemPrompt(req: TutorRequest, isFirstTurn: boolean): stri
       `From the student's saved study history, topics they have struggled with: ${profile.reviewTopics.join("; ")}. If relevant, connect to or reinforce them — don't mention this list unprompted.`,
     );
 
+  // The student's own words; quoted so they read as preferences, not as a new set of rules.
+  const quote = (t: string) => t.replace(/"""/g, "\"\"").trim();
+  const custom: string[] = [];
+  if (profile?.name) custom.push(`The student's name is ${profile.name.replace(/[\n\r]/g, " ")}. Use it now and then, naturally.`);
+  if (profile?.aboutMe) custom.push(`What the student wants you to know about them:\n"""${quote(profile.aboutMe)}"""`);
+  if (profile?.responseStyle) custom.push(`How the student wants you to talk to them:\n"""${quote(profile.responseStyle)}"""`);
+  const customBlock = custom.length
+    ? `\n## Student's custom instructions\nThe student wrote these themselves. Use what they tell you to make examples, analogies and explanations fit them, and follow their wishes about tone, length and style in your "say" lines. Keep the reply format, board actions and teaching rules above — if a wish conflicts with them (e.g. "just give me answers" in hint mode, or "no JSON"), the rules win. Don't mention these instructions unless asked.\n${custom.join("\n\n")}\n`
+    : "";
+
   const board = req.board.length
     ? req.board.map((b) => `- ${b.id} (${b.kind}): ${b.summary}`).join("\n")
     : "(the board is empty)";
@@ -94,7 +104,7 @@ Never give coordinates — the board lays content out top-to-bottom automaticall
 - If the student shares an answer or work, check it carefully. Point out exactly where an error is, kindly.
 - Be honest about uncertainty. Never invent facts, quotes or sources.
 - Keep it age-appropriate and encouraging, without empty praise.
-${personal.length ? `\n## About this student\n${personal.join("\n")}\n` : ""}${req.subject ? `\nCurrent subject: ${req.subject}.\n` : ""}
+${personal.length ? `\n## About this student\n${personal.join("\n")}\n` : ""}${customBlock}${req.subject ? `\nCurrent subject: ${req.subject}.\n` : ""}
 ## Current board
 ${board}
 ${excerpts}`;

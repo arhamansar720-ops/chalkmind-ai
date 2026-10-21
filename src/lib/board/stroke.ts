@@ -109,20 +109,20 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 export function strokeDuration(el: StrokeTarget, kind: StrokeKind = strokeKind(el)): number {
   switch (kind) {
     case "write":
-      return clamp([...(el.text ?? "")].length * 30, 220, 1500);
+      return clamp([...(el.text ?? "")].length * 65, 450, 2800);
     case "trace":
-      return clamp(pathLength(el.points ?? []) * 1.1, 180, 950);
+      return clamp(pathLength(el.points ?? []) * 2.2, 350, 1600);
     case "outline":
-      return clamp(pathLength(outlinePoints(el.type, el.width, el.height)) * 0.8, 240, 950);
+      return clamp(pathLength(outlinePoints(el.type, el.width, el.height)) * 1.7, 500, 1700);
     case "wipe":
-      return clamp(el.width * 2.4, 350, 1500);
+      return clamp(el.width * 6, 800, 3200);
     case "fade":
-      return 260;
+      return 350;
   }
 }
 
 /** Upper bound for drawing one board action, so big tables and graphs don't drag on. */
-export const MAX_ACTION_DRAW_MS = 3600;
+export const MAX_ACTION_DRAW_MS = 7000;
 
 /**
  * Per-element durations for drawing a set of elements in order, scaled by
@@ -139,4 +139,45 @@ export function planDurations(els: StrokeTarget[], speed = 1, budget = MAX_ACTIO
 /** Ease-out so strokes start quick and settle, like a pen. */
 export function easeStroke(t: number): number {
   return 1 - Math.pow(1 - clamp(t, 0, 1), 2);
+}
+
+export interface TipTarget extends StrokeTarget {
+  x: number;
+  y: number;
+}
+
+/**
+ * Where the pen is `t` (0..1) of the way through drawing an element, in scene
+ * coordinates — shown as a marker tip so the student sees it being written.
+ */
+export function tipPoint(el: TipTarget, t: number, kind: StrokeKind = strokeKind(el)): Point | null {
+  if (t <= 0 || t >= 1) return null;
+  switch (kind) {
+    case "write": {
+      const lines = (el.text ?? "").split("\n");
+      const total = lines.reduce((n, l) => n + [...l].length, 0) || 1;
+      const longest = Math.max(1, ...lines.map((l) => [...l].length));
+      let left = Math.floor(total * t);
+      for (let i = 0; i < lines.length; i++) {
+        const len = [...lines[i]].length;
+        if (left <= len || i === lines.length - 1) {
+          return [el.x + el.width * (Math.min(left, len) / longest), el.y + ((i + 0.7) * el.height) / lines.length];
+        }
+        left -= len;
+      }
+      return null;
+    }
+    case "trace": {
+      const p = partialPath(el.points ?? [], t).at(-1);
+      return p ? [el.x + p[0], el.y + p[1]] : null;
+    }
+    case "outline": {
+      const p = partialPath(outlinePoints(el.type, el.width, el.height), t).at(-1);
+      return p ? [el.x + p[0], el.y + p[1]] : null;
+    }
+    case "wipe":
+      return [el.x + el.width * t, el.y + el.height * 0.55];
+    case "fade":
+      return null;
+  }
 }

@@ -48,3 +48,24 @@ describe("stroke-by-stroke drawing", () => {
     expect(easeStroke(1)).toBe(1);
   });
 });
+
+describe("handwriting", () => {
+  it("writes simple equations by hand and keeps hard ones typeset", async () => {
+    const { handwrittenMath } = await import("@/lib/board/text");
+    expect(handwrittenMath("3x - 7 = 11")).toBe("3x - 7 = 11");
+    expect(handwrittenMath("x^2 + 5x + 6 = 0")).toBe("x² + 5x + 6 = 0");
+    expect(handwrittenMath("a^2 + b^2 = c^2")).toBe("a² + b² = c²");
+    expect(handwrittenMath("x = \\frac{18}{3}")).toBe("x = 18/3");
+    expect(handwrittenMath("\\int_0^1 x\\,dx")).toBeNull();
+    expect(handwrittenMath("\\frac{\\frac{1}{2}}{3}")).toBeNull();
+    expect(handwrittenMath("x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}")).toBeNull();
+  });
+
+  it("puts the pen tip where the stroke has got to", async () => {
+    const { tipPoint } = await import("@/lib/board/stroke");
+    const text = { type: "text", x: 100, y: 50, width: 200, height: 40, text: "abcd" };
+    expect(tipPoint(text, 0.5)![0]).toBe(200);
+    expect(tipPoint({ type: "arrow", x: 10, y: 10, width: 100, height: 0, points: [[0, 0], [100, 0]] }, 0.5)).toEqual([60, 10]);
+    expect(tipPoint(text, 1)).toBeNull();
+  });
+});

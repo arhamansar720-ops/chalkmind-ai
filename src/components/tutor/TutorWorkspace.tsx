@@ -376,7 +376,9 @@ export function TutorWorkspace() {
                   autoId: () => `item${++autoIdRef.current}`,
                   step,
                   animate: animate && !turn.fast,
-                  draw: { speed: drawSpeed(pace), skip: () => turn.fast || turn.stopped },
+                  // Drawing is the lesson itself, so it follows the student's setting rather than reduced motion.
+                  handwriting: profile.drawAnimation !== false,
+                  ...(profile.drawAnimation !== false && !turn.fast ? { draw: { speed: drawSpeed(pace), skip: () => turn.fast || turn.stopped } } : {}),
                 });
                 turn.cursor = res.cursor;
                 if (res.cleared) {
