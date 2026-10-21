@@ -20,7 +20,7 @@ export class AnthropicProvider implements AIProvider {
 
   async *stream(req: GenerateRequest): AsyncGenerator<StreamChunk> {
     const needsVision = req.vision || hasImages(req.messages);
-    const model = needsVision ? this.cfg.visionModel : this.cfg.model;
+    const model = req.model ?? (needsVision ? this.cfg.visionModel : this.cfg.model);
     if (!model) throw new AIError("unsupported_input", "No vision model is configured.", "Set AI_VISION_MODEL.");
 
     const system = req.json
@@ -52,7 +52,7 @@ export class AnthropicProvider implements AIProvider {
     }
     if (!res.ok || !res.body) {
       const detail = (await res.text().catch(() => "")).slice(0, 400);
-      throw errorFromStatus(this.cfg.label, res.status, detail);
+      throw errorFromStatus(this.cfg.label, res.status, detail, res.headers);
     }
 
     let finish: "stop" | "length" | "other" = "stop";

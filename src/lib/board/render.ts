@@ -6,6 +6,7 @@ import type { ExcalidrawElementSkeleton } from "@excalidraw/excalidraw/data/tran
 import { cursorBelow, layoutStep, type Bounds, type Cursor, type PreparedEquation, type RegisteredItem } from "./layout";
 import { hashString, renderEquation, svgToDataURL } from "./math-svg";
 import type { BoardAction } from "./schema";
+import { easeStroke, outlinePoints, partialPath, partialText, planDurations, strokeKind, type Point } from "./stroke";
 
 type ExcalidrawLib = typeof import("@excalidraw/excalidraw");
 
@@ -63,6 +64,12 @@ export interface RenderOptions {
   autoId: () => string;
   step: number;
   animate: boolean;
+  /**
+   * Draw the new content stroke by stroke instead of adding it whole.
+   * `speed` scales the drawing time (1 = normal, higher = slower); `skip`
+   * finishes the drawing at once (e.g. when the student presses Stop).
+   */
+  draw?: { speed: number; skip: () => boolean };
 }
 
 export interface RenderResult {
@@ -92,12 +99,11 @@ export async function renderActions(handle: BoardHandle, actions: BoardAction[],
   });
 
   const created = lib.convertToExcalidrawElements(result.skeletons as unknown as ExcalidrawElementSkeleton[], { regenerateIds: false });
-  const current = api.getSceneElements();
-  const kept = result.clear ? current.map((el) => lib.newElementWith(el, { isDeleted: true })) : current;
-  api.updateScene({ elements: [...kept, ...created], captureUpdate: lib.CaptureUpdateAction.IMMEDIATELY });
+  const before = result.clear ? [] : api.getSceneElements();
 
+  // Bring the spot being drawn on into view first, so the student watches it appear.
   const focusEls = result.focus
-    ? api.getSceneElements().filter((e) => {
+    ? [...before, ...created].filter((e) => {
         const f = result.focus!;
         return e.x < f.x + f.width && e.x + e.width > f.x && e.y < f.y + f.height && e.y + e.height > f.y;
       })
@@ -110,7 +116,141 @@ export async function renderActions(handle: BoardHandle, actions: BoardAction[],
     const tooWide = state.width < 730 && maxX - minX > viewW * 0.92;
     api.scrollToContent(focusEls, { animate: opts.animate, duration: 380, ...(tooWide ? { fitToViewport: true, viewportZoomFactor: 0.92 } : {}) });
   }
+
+  if (opts.animate && opts.draw && created.length) {
+    await drawIn(handle, created, result.clear, opts.draw);
+  } else {
+    const current = api.getSceneElements();
+    const kept = result.clear ? current.map((el) => lib.newElementWith(el, { isDeleted: true })) : current;
+    api.updateScene({ elements: [...kept, ...created], captureUpdate: lib.CaptureUpdateAction.IMMEDIATELY });
+  }
   return { cursor: result.cursor, registered: result.registered, warnings: result.warnings, cleared: result.clear };
+}
+
+const nextFrame = () => new Promise<number>((r) => requestAnimationFrame(r));
+
+const naturalSizes = new Map<string, Promise<{ w: number; h: number } | null>>();
+function naturalSize(dataURL: string): Promise<{ w: number; h: number } | null> {
+  let p = naturalSizes.get(dataURL);
+  if (!p) {
+    p = new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img.naturalWidth && img.naturalHeight ? { w: img.naturalWidth, h: img.naturalHeight } : null);
+      img.onerror = () => resolve(null);
+      img.src = dataURL;
+    });
+    naturalSizes.set(dataURL, p);
+  }
+  return p;
+}
+
+/**
+ * Add `created` to the scene one element at a time, each drawn in over a few
+ * frames: text is written character by character, lines and arrows are traced
+ * from their start, shape borders are traced around, and equations are wiped
+ * in left to right. The intermediate frames are folded into one undo step.
+ */
+async function drawIn(handle: BoardHandle, created: ExcalidrawElement[], clear: boolean, draw: { speed: number; skip: () => boolean }) {
+  const { api, lib } = handle;
+  const ours = new Set(created.map((e) => e.id));
+  const temp = new Set<string>();
+  const shown: ExcalidrawElement[] = [];
+  /** Board content as committed before we started, by id (for clear_board). */
+  const original = new Map(api.getSceneElementsIncludingDeleted().map((e) => [e.id, e]));
+  // Equations not drawn yet sit on the board invisibly so their images load before the wipe reaches them.
+  const preload = (from: number) => created.slice(from).filter((e) => e.type === "image").map((e) => lib.newElementWith(e, { opacity: 0 }));
+
+  const base = () => api.getSceneElementsIncludingDeleted().filter((e) => !ours.has(e.id) && !temp.has(e.id));
+  const cleared = (els: readonly ExcalidrawElement[]) => (clear ? els.map((el) => (el.isDeleted ? el : lib.newElementWith(el, { isDeleted: true }))) : els);
+
+  const push = (extra: ExcalidrawElement[], from: number) =>
+    api.updateScene({ elements: [...cleared(base()), ...shown, ...extra, ...preload(from)], captureUpdate: lib.CaptureUpdateAction.EVENTUALLY });
+
+  // Excalidraw leaves elements it has never committed out of an undo step (it takes
+  // them for in-progress local drawing), so put the board back the way it was
+  // committed, then add the finished drawing as a single undoable change.
+  const commit = () => {
+    const rest = base().map((e) => (clear && original.has(e.id) ? original.get(e.id)! : e));
+    api.updateScene({ elements: rest, captureUpdate: lib.CaptureUpdateAction.EVENTUALLY });
+    api.updateScene({ elements: [...cleared(rest), ...created], captureUpdate: lib.CaptureUpdateAction.IMMEDIATELY });
+  };
+
+  const durations = planDurations(created as unknown as Parameters<typeof planDurations>[0], draw.speed);
+  try {
+    for (let i = 0; i < created.length; i++) {
+      if (draw.skip()) break;
+      const el = created[i];
+      const frame = await framer(handle, el, temp);
+      const start = performance.now();
+      while (!draw.skip()) {
+        const t = (performance.now() - start) / durations[i];
+        if (t >= 1) break;
+        push(frame(easeStroke(t)), i + 1);
+        await nextFrame();
+      }
+      shown.push(el);
+    }
+  } finally {
+    commit();
+  }
+}
+
+type Frame = (t: number) => ExcalidrawElement[];
+
+/** Build the function that renders `el` part-way (0..1) through being drawn. */
+async function framer({ api, lib }: BoardHandle, el: ExcalidrawElement, temp: Set<string>): Promise<Frame> {
+  const kind = strokeKind(el as unknown as Parameters<typeof strokeKind>[0]);
+  const fade: Frame = (t) => [lib.newElementWith(el, { opacity: Math.round(el.opacity * t) })];
+
+  if (kind === "write" && el.type === "text") {
+    return (t) => {
+      const text = partialText(el.text, t);
+      return text ? [lib.newElementWith(el, { text, originalText: text })] : [];
+    };
+  }
+  if (kind === "trace" && "points" in el) {
+    const points = el.points as unknown as Point[];
+    return (t) => [lib.newElementWith(el as never, { points: partialPath(points, t) } as never)];
+  }
+  if (kind === "outline") {
+    // Trace the border with a stand-in line, then swap in the real shape (and its fill).
+    const outline = outlinePoints(el.type, el.width, el.height);
+    const [pen] = lib.convertToExcalidrawElements(
+      [
+        {
+          type: "line",
+          x: el.x,
+          y: el.y,
+          points: outline as [number, number][],
+          strokeColor: el.strokeColor,
+          strokeWidth: el.strokeWidth,
+          strokeStyle: el.strokeStyle,
+          roughness: el.roughness,
+          opacity: el.opacity,
+          angle: el.angle,
+        } as unknown as ExcalidrawElementSkeleton,
+      ],
+      { regenerateIds: true },
+    );
+    if (!pen) return fade;
+    temp.add(pen.id);
+    return (t) => [lib.newElementWith(pen as never, { points: partialPath(outline, t) } as never)];
+  }
+  if (kind === "wipe" && el.type === "image" && el.fileId) {
+    const file = api.getFiles()[el.fileId];
+    const size = file ? await naturalSize(file.dataURL) : null;
+    if (!size) return fade;
+    return (t) =>
+      t <= 0
+        ? []
+        : [
+            lib.newElementWith(el, {
+              width: el.width * t,
+              crop: { x: 0, y: 0, width: size.w * t, height: size.h, naturalWidth: size.w, naturalHeight: size.h },
+            }),
+          ];
+  }
+  return fade;
 }
 
 /** Clear the board as one undoable change. */

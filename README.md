@@ -78,10 +78,11 @@ AI_MODEL=qwen3
 | `AI_API_KEY` | Provider key (or the provider-specific variable above). Not needed for Ollama. |
 | `AI_MODEL` | Model id. Defaults: groq `openai/gpt-oss-120b`, openai `gpt-5-mini`, anthropic `claude-haiku-5-5`, openrouter `openai/gpt-oss-120b`, ollama `qwen3`. |
 | `AI_VISION_MODEL` | Model for image input. Defaults: groq `qwen/qwen3.8-27b`; openai/anthropic = `AI_MODEL`; others none. `none` disables image input. |
+| `AI_FALLBACK_MODELS` | Comma-separated models to switch to while `AI_MODEL` is rate-limited (each model has its own limits); the student sees which model answered and when the main one is back. Defaults: groq `openai/gpt-oss-20b, llama-3.3-70b-versatile, qwen/qwen3-32b`; openai `gpt-5-nano`; openrouter `openai/gpt-oss-20b, meta-llama/llama-3.3-70b-instruct`; none for a custom `AI_MODEL`. `none` disables. When every model is limited, the tutor shows a countdown until it can be used again. |
 | `AI_BASE_URL` | Override the API base URL (required for `openai-compatible`, e.g. LM Studio / vLLM). |
 | `AI_MAX_OUTPUT_TOKENS` | Output cap per request (default 4096). |
 | `EMBEDDINGS_PROVIDER`, `EMBEDDINGS_MODEL`, `EMBEDDINGS_API_KEY`, `EMBEDDINGS_BASE_URL` | Optional semantic document search (`ollama` → `nomic-embed-text`, or `openai`). Without it, keyword search is used. |
-| `RATE_LIMIT_PER_MINUTE` | AI requests per client per minute, per server instance (default 20). |
+| `RATE_LIMIT_PER_MINUTE` | AI requests per client per minute, per server instance (default 40). |
 | `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Optional cloud sync + magic-link sign-in. |
 | `REQUIRE_AUTH` | `true` = AI routes require a signed-in Supabase user (recommended for public deployments). |
 | `CHALKMIND_DEBUG_AI` | Dev only: logs invalid structured AI replies (may include student input). |

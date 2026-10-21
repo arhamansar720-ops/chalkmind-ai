@@ -27,30 +27,66 @@ const HTTP_STATUS: Record<AIErrorCode, number> = {
 export class AIError extends Error {
   readonly code: AIErrorCode;
   readonly hint?: string;
-  constructor(code: AIErrorCode, message: string, hint?: string) {
+  /** For rate limits: seconds until the provider accepts requests again, when known. */
+  readonly retryAfterSec?: number;
+  constructor(code: AIErrorCode, message: string, hint?: string, retryAfterSec?: number) {
     super(message);
     this.name = "AIError";
     this.code = code;
     this.hint = hint;
+    this.retryAfterSec = retryAfterSec;
   }
   get status(): number {
     return HTTP_STATUS[this.code];
   }
   toJSON() {
-    return { code: this.code, message: this.message, ...(this.hint ? { hint: this.hint } : {}) };
+    return {
+      code: this.code,
+      message: this.message,
+      ...(this.hint ? { hint: this.hint } : {}),
+      ...(this.retryAfterSec !== undefined ? { retryAfterSec: this.retryAfterSec } : {}),
+    };
   }
 }
 
+/** Parse a duration like "12", "7.66s", "2m59.56s" or "450ms" into whole seconds. */
+export function parseDurationSec(value: string | null | undefined): number | undefined {
+  const v = value?.trim();
+  if (!v) return undefined;
+  if (/^\d+(\.\d+)?$/.test(v)) return Math.max(1, Math.ceil(Number(v)));
+  const m = /^(?:(\d+)h)?(?:(\d+)m(?!s))?(?:(\d+(?:\.\d+)?)s)?(?:(\d+(?:\.\d+)?)ms)?$/.exec(v);
+  if (!m || !m.slice(1).some(Boolean)) return undefined;
+  const sec = Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0) + Number(m[4] ?? 0) / 1000;
+  return Math.max(1, Math.ceil(sec));
+}
+
+/** Seconds until a rate-limited provider resets, from its response headers. */
+export function retryAfterFromHeaders(headers?: Headers): number | undefined {
+  if (!headers) return undefined;
+  const direct = parseDurationSec(headers.get("retry-after"));
+  if (direct !== undefined) return direct;
+  // Groq / OpenAI: separate request and token windows; wait for whichever is exhausted.
+  const waits = ["x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"]
+    .map((h) => parseDurationSec(headers.get(h)))
+    .filter((n): n is number => n !== undefined);
+  return waits.length ? Math.max(...waits) : undefined;
+}
+
 /** Map a provider HTTP failure to an AIError. `detail` is the provider's body (already truncated). */
-export function errorFromStatus(provider: string, status: number, detail: string): AIError {
+export function errorFromStatus(provider: string, status: number, detail: string, headers?: Headers): AIError {
   const d = detail.toLowerCase();
   if (status === 401 || status === 403)
     return new AIError("auth", `${provider} rejected the API key.`, "Check AI_API_KEY (or the provider-specific key) in .env.local.");
-  if (status === 404 || d.includes("model_not_found") || d.includes("does not exist"))
+  if (status === 404 || d.includes("model_not_found") || d.includes("does not exist") || d.includes("decommissioned"))
     return new AIError("model_not_found", `${provider} could not find the configured model.`, "Check AI_MODEL — for Ollama, run `ollama pull <model>` first.");
   if (status === 413) return new AIError("too_large", "The request was too large for the model. Try a shorter input or smaller image.");
   if (status === 429)
-    return new AIError("rate_limited", `${provider} rate limit reached. Wait a moment and try again.`, "Free tiers have per-minute token limits.");
+    return new AIError(
+      "rate_limited",
+      `${provider} rate limit reached. Wait a moment and try again.`,
+      "Free tiers have per-minute token limits.",
+      retryAfterFromHeaders(headers),
+    );
   if (status === 400 && (d.includes("image") || d.includes("vision") || d.includes("multimodal")))
     return new AIError("unsupported_input", "The configured model can't read images.", "Set AI_VISION_MODEL to a vision-capable model.");
   if (status === 400 && (d.includes("context") || d.includes("too long") || d.includes("maximum")))
