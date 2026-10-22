@@ -12,6 +12,8 @@ export interface ProviderPreset {
   keyEnv: string | null;
   defaultModel: string | null;
   defaultVisionModel: string | null;
+  /** Tried in order when the main model is rate-limited (each model has its own limits). */
+  defaultFallbackModels: string[];
   supportsJsonMode: boolean;
   pricing: string;
 }
@@ -23,6 +25,7 @@ export const PRESETS: Record<ProviderId, ProviderPreset> = {
     keyEnv: "GROQ_API_KEY",
     defaultModel: "openai/gpt-oss-120b",
     defaultVisionModel: "qwen/qwen3.8-27b",
+    defaultFallbackModels: ["openai/gpt-oss-20b", "llama-3.3-70b-versatile", "qwen/qwen3-32b"],
     supportsJsonMode: true,
     pricing: "Free tier with rate limits; paid per token beyond it.",
   },
@@ -32,6 +35,7 @@ export const PRESETS: Record<ProviderId, ProviderPreset> = {
     keyEnv: "OPENAI_API_KEY",
     defaultModel: "gpt-5-mini",
     defaultVisionModel: "gpt-5-mini",
+    defaultFallbackModels: ["gpt-5-nano"],
     supportsJsonMode: true,
     pricing: "Paid per token.",
   },
@@ -41,6 +45,7 @@ export const PRESETS: Record<ProviderId, ProviderPreset> = {
     keyEnv: "OPENROUTER_API_KEY",
     defaultModel: "openai/gpt-oss-120b",
     defaultVisionModel: null,
+    defaultFallbackModels: ["openai/gpt-oss-20b", "meta-llama/llama-3.3-70b-instruct"],
     supportsJsonMode: true,
     pricing: "Paid per token (some models have free variants).",
   },
@@ -50,6 +55,7 @@ export const PRESETS: Record<ProviderId, ProviderPreset> = {
     keyEnv: "ANTHROPIC_API_KEY",
     defaultModel: "claude-haiku-5-5",
     defaultVisionModel: "claude-haiku-5-5",
+    defaultFallbackModels: [],
     supportsJsonMode: false,
     pricing: "Paid per token.",
   },
@@ -59,6 +65,7 @@ export const PRESETS: Record<ProviderId, ProviderPreset> = {
     keyEnv: null,
     defaultModel: "qwen3",
     defaultVisionModel: null,
+    defaultFallbackModels: [],
     supportsJsonMode: true,
     pricing: "Free — runs on your own computer.",
   },
@@ -68,6 +75,7 @@ export const PRESETS: Record<ProviderId, ProviderPreset> = {
     keyEnv: null,
     defaultModel: null,
     defaultVisionModel: null,
+    defaultFallbackModels: [],
     supportsJsonMode: true,
     pricing: "Depends on your server.",
   },
@@ -80,6 +88,7 @@ export interface AIConfig {
   apiKey: string | null;
   model: string;
   visionModel: string | null;
+  fallbackModels: string[];
   supportsJsonMode: boolean;
   maxOutputTokens: number;
   pricing: string;
@@ -132,6 +141,12 @@ export function readAIConfig(env: Env = process.env): ConfigResult {
   const visionEnv = env.AI_VISION_MODEL?.trim();
   const visionModel = visionEnv === "none" ? null : visionEnv || preset.defaultVisionModel;
   const maxOut = Number(env.AI_MAX_OUTPUT_TOKENS);
+  const fallbackEnv = env.AI_FALLBACK_MODELS?.trim();
+  // Preset fallbacks only make sense for the preset's own default model.
+  const presetFallbacks = env.AI_MODEL?.trim() && env.AI_MODEL.trim() !== preset.defaultModel ? [] : preset.defaultFallbackModels;
+  const fallbackModels = (fallbackEnv === "none" ? [] : fallbackEnv ? fallbackEnv.split(",").map((m) => m.trim()).filter(Boolean) : presetFallbacks)
+    .filter((m, i, all) => m !== model && all.indexOf(m) === i)
+    .slice(0, 5);
 
   return {
     ok: true,
@@ -142,6 +157,7 @@ export function readAIConfig(env: Env = process.env): ConfigResult {
       apiKey,
       model: model!,
       visionModel,
+      fallbackModels,
       supportsJsonMode: preset.supportsJsonMode,
       maxOutputTokens: Number.isFinite(maxOut) && maxOut > 256 ? Math.min(maxOut, 32000) : 4096,
       pricing: preset.pricing,
@@ -196,6 +212,7 @@ export function publicConfig(env: Env = process.env) {
           label: ai.config.label,
           model: ai.config.model,
           visionModel: ai.config.visionModel,
+          fallbackModels: ai.config.fallbackModels,
           pricing: ai.config.pricing,
           local: ai.config.provider === "ollama",
         }

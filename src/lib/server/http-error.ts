@@ -4,6 +4,7 @@ export class HttpError extends Error {
     readonly code: string,
     message: string,
     readonly hint?: string,
+    readonly retryAfterSec?: number,
   ) {
     super(message);
   }

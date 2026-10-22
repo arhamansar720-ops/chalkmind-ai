@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Cloud, Cpu, Download, HardDrive, Mic, Trash2, User, Volume2 } from "lucide-react";
+import { ClipboardCopy, Cloud, Cpu, Download, HardDrive, Mic, Sparkles, Trash2, User, Volume2 } from "lucide-react";
+import { clip, IMPORT_PROMPT, MAX_INSTRUCTION_CHARS, splitImportedProfile } from "@/lib/learning/custom-instructions";
 import { useHealth } from "@/lib/client/health";
 import { useProfile } from "@/lib/client/profile";
 import { store, useCollection } from "@/lib/store";
@@ -11,7 +12,7 @@ import { downloadText, relativeTime } from "@/lib/utils";
 import { useVoiceOutput } from "@/lib/voice/hooks";
 import { useAuth } from "@/components/shell/AuthProvider";
 import { setTheme, useTheme } from "@/components/ThemeToggle";
-import { Alert, Badge, Button, Card, ConfirmDialog, Field, Input, PageHeader, Segmented, Select } from "@/components/ui";
+import { Alert, Badge, Button, Card, ConfirmDialog, Field, Input, PageHeader, Segmented, Select, Textarea } from "@/components/ui";
 import { LESSON_PACES } from "@/lib/tutor/pace";
 
 const STYLES: { value: Profile["style"]; label: string }[] = [
@@ -107,6 +108,17 @@ export function Settings() {
             </div>
             <p className="mt-1.5 text-[12px] text-muted">How long each step stays up before the next one appears and the board keeps drawing. With voice on, the tutor also waits for each spoken step.</p>
           </div>
+          <label className="mt-4 flex items-start gap-3">
+            <input type="checkbox" checked={profile.drawAnimation ?? true} onChange={(e) => void update({ drawAnimation: e.target.checked })} className="mt-1 size-4 accent-[var(--accent)]" />
+            <span className="text-[14px]">
+              <span className="font-medium">Write on the board stroke by stroke</span>
+              <span className="mt-0.5 block text-[13px] text-muted">The tutor writes out each line, equation and diagram as you watch. Turn off to have it appear at once.</span>
+            </span>
+          </label>
+        </Section>
+
+        <Section icon={Sparkles} title="Custom instructions">
+          <CustomInstructions key={`ci-${profile.createdAt}`} profile={profile} onSave={update} />
         </Section>
 
         <Section icon={Cpu} title="Personalization">
@@ -305,5 +317,113 @@ function Section({ icon: Icon, title, children }: { icon: typeof User; title: st
       </h2>
       {children}
     </Card>
+  );
+}
+
+type SaveProfile = ReturnType<typeof useProfile>["update"];
+
+/** "What should the tutor know about you / how should it talk to you", plus importing from ChatGPT. */
+function CustomInstructions({ profile, onSave }: { profile: Profile; onSave: SaveProfile }) {
+  const [about, setAbout] = useState(profile.aboutMe ?? "");
+  const [style, setStyle] = useState(profile.responseStyle ?? "");
+  const [importOpen, setImportOpen] = useState(false);
+  const [pasted, setPasted] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const save = (patch: { aboutMe?: string; responseStyle?: string }) => void onSave(patch).then(() => setMsg("Saved. The tutor uses this from your next question."));
+
+  const copyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(IMPORT_PROMPT);
+      setMsg("Prompt copied. Paste it into ChatGPT, then paste its answer below.");
+    } catch {
+      setMsg("Couldn't copy automatically — select the prompt text and copy it.");
+    }
+  };
+
+  const applyImport = () => {
+    const { about: a, style: s } = splitImportedProfile(pasted);
+    const nextAbout = clip([about.trim(), a].filter(Boolean).join("\n\n"));
+    const nextStyle = clip([style.trim(), s].filter(Boolean).join("\n\n"));
+    setAbout(nextAbout);
+    setStyle(nextStyle);
+    setPasted("");
+    setImportOpen(false);
+    save({ aboutMe: nextAbout || undefined, responseStyle: nextStyle || undefined });
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <p className="text-[13.5px] leading-relaxed text-ink-2">
+        Tell the tutor about yourself and how you like to be talked to, like custom instructions in ChatGPT. It uses this in every lesson to pick examples and match your style.
+      </p>
+      <Field label="What should the tutor know about you?" htmlFor="ci-about" hint={`${about.length}/${MAX_INSTRUCTION_CHARS}`}>
+        <Textarea
+          id="ci-about"
+          value={about}
+          maxLength={MAX_INSTRUCTION_CHARS}
+          onChange={(e) => setAbout(e.target.value)}
+          onBlur={() => about !== (profile.aboutMe ?? "") && save({ aboutMe: about.trim() || undefined })}
+          placeholder="e.g. I'm in Grade 10 and want to get an A in chemistry. I play basketball and like examples from sports. Fractions still confuse me."
+          rows={4}
+        />
+      </Field>
+      <Field label="How should the tutor talk to you?" htmlFor="ci-style" hint={`${style.length}/${MAX_INSTRUCTION_CHARS}`}>
+        <Textarea
+          id="ci-style"
+          value={style}
+          maxLength={MAX_INSTRUCTION_CHARS}
+          onChange={(e) => setStyle(e.target.value)}
+          onBlur={() => style !== (profile.responseStyle ?? "") && save({ responseStyle: style.trim() || undefined })}
+          placeholder="e.g. Be casual and funny, keep it short, use real-life examples, and quiz me a lot. Explain in simple English."
+          rows={4}
+        />
+      </Field>
+
+      <div className="rounded-xl border border-border bg-surface-2 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-[13.5px] font-medium">Bring over what ChatGPT knows about you</p>
+            <p className="mt-0.5 text-[12.5px] text-muted">Works with ChatGPT, Gemini, Claude or any assistant that remembers you.</p>
+          </div>
+          {!importOpen && (
+            <Button size="sm" onClick={() => setImportOpen(true)}>
+              Import
+            </Button>
+          )}
+        </div>
+        {importOpen && (
+          <ol className="mt-3 flex list-decimal flex-col gap-3 pl-5 text-[13px] text-ink-2">
+            <li>
+              Copy this prompt and send it to ChatGPT:
+              <pre className="mt-1.5 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border bg-surface p-2.5 font-sans text-[12px] leading-relaxed text-muted">{IMPORT_PROMPT}</pre>
+              <Button size="sm" className="mt-2" icon={<ClipboardCopy className="size-3.5" />} onClick={() => void copyPrompt()}>
+                Copy prompt
+              </Button>
+            </li>
+            <li>
+              Paste ChatGPT&apos;s answer here. You can also paste your ChatGPT custom instructions or memories.
+              <Textarea
+                aria-label="ChatGPT's answer"
+                value={pasted}
+                onChange={(e) => setPasted(e.target.value.slice(0, 6000))}
+                placeholder="About me: …&#10;How to talk to me: …"
+                rows={5}
+                className="mt-1.5"
+              />
+              <div className="mt-2 flex gap-2">
+                <Button size="sm" variant="primary" disabled={!pasted.trim()} onClick={applyImport}>
+                  Add to my instructions
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setImportOpen(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </li>
+          </ol>
+        )}
+      </div>
+      {msg && <p className="text-[12.5px] text-muted" role="status">{msg}</p>}
+    </div>
   );
 }

@@ -47,7 +47,11 @@ export const tutorRequestSchema = z.object({
     .object({
       style: z.enum(["balanced", "concise", "detailed", "visual", "step-by-step"]).default("balanced"),
       level: z.string().max(40).optional(),
+      name: z.string().max(60).optional(),
       reviewTopics: z.array(z.string().max(80)).max(8).default([]),
+      /** The student's custom instructions, written by them. */
+      aboutMe: z.string().max(1500).optional(),
+      responseStyle: z.string().max(1500).optional(),
     })
     .optional(),
   excerpts: z
@@ -65,6 +69,8 @@ export const tutorRequestSchema = z.object({
   image: imageDataUrl.optional(),
   /** Images attached to the latest user message. */
   images: z.array(imageDataUrl).max(MAX_IMAGES).default([]),
+  /** Set when the latest user message answers a check-in question, so the tutor judges it. */
+  checkIn: z.object({ question: z.string().max(300) }).optional(),
 }).refine((r) => (r.image?.length ?? 0) + r.images.reduce((n, i) => n + i.length, 0) <= MAX_IMAGE_CHARS, {
   message: "Attached images are too large in total. Attach fewer or smaller images.",
   path: ["images"],
@@ -89,7 +95,12 @@ const modelSignal = z.object({
   note: z.string().max(200).optional(),
 });
 const modelCheck = z.object({ t: z.literal("check"), question: z.string().min(1).max(300) });
-const modelLine = z.discriminatedUnion("t", [modelSay, modelBoard, modelFollowups, modelTitle, modelSignal, modelCheck]);
+const modelVerdict = z.object({
+  t: z.literal("verdict"),
+  understood: z.preprocess((v) => (v === "true" ? true : v === "false" ? false : v), z.boolean()),
+  note: z.string().max(200).optional(),
+});
+const modelLine = z.discriminatedUnion("t", [modelSay, modelBoard, modelFollowups, modelTitle, modelSignal, modelCheck, modelVerdict]);
 
 /* ------------------------------------------------------ server → browser */
 
@@ -102,9 +113,13 @@ export type TutorEvent =
   | { type: "followups"; items: string[] }
   /** Pause point: the lesson waits until the student says whether they follow. */
   | { type: "check"; question: string }
+  /** The tutor's judgement of the student's answer to a check-in. */
+  | { type: "verdict"; understood: boolean; note?: string }
+  /** The main model is rate-limited; a fallback model is answering instead. */
+  | { type: "fallback"; from: string; to: string; retryAfterSec: number }
   | { type: "signal"; kind: "struggle" | "misconception" | "mastered"; topic: string; note?: string }
   | { type: "notice"; message: string }
-  | { type: "error"; code: string; message: string; hint?: string }
+  | { type: "error"; code: string; message: string; hint?: string; retryAfterSec?: number }
   | { type: "done"; truncated: boolean };
 
 /**
@@ -154,6 +169,8 @@ export function modelObjectToEvents(raw: unknown): TutorEvent[] {
       return [{ type: "signal", kind: line.kind, topic: line.topic, note: line.note }];
     case "check":
       return [{ type: "check", question: line.question }];
+    case "verdict":
+      return [{ type: "verdict", understood: line.understood, note: line.note }];
   }
 }
 
@@ -169,9 +186,11 @@ export const tutorEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("followups"), items: z.array(z.string()) }),
   z.object({ type: z.literal("check"), question: z.string() }),
+  z.object({ type: z.literal("verdict"), understood: z.boolean(), note: z.string().optional() }),
+  z.object({ type: z.literal("fallback"), from: z.string(), to: z.string(), retryAfterSec: z.number() }),
   z.object({ type: z.literal("signal"), kind: z.enum(["struggle", "misconception", "mastered"]), topic: z.string(), note: z.string().optional() }),
   z.object({ type: z.literal("notice"), message: z.string() }),
-  z.object({ type: z.literal("error"), code: z.string(), message: z.string(), hint: z.string().optional() }),
+  z.object({ type: z.literal("error"), code: z.string(), message: z.string(), hint: z.string().optional(), retryAfterSec: z.number().optional() }),
   z.object({ type: z.literal("done"), truncated: z.boolean() }),
 ]);
 

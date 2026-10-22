@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { BookmarkPlus, Check, CheckCircle2, MessagesSquare, PencilRuler, Volume2, VolumeX } from "lucide-react";
+import { BookmarkPlus, Check, CheckCircle2, Hourglass, MessagesSquare, PencilRuler, Shuffle, Volume2, VolumeX } from "lucide-react";
 import { boardIndexFromElements, emptyCursor, type Cursor, type RegisteredItem } from "@/lib/board/layout";
 import { clearScene, cursorForScene, renderActions, snapshotScene, type BoardHandle } from "@/lib/board/render";
 import { ApiError, streamTutor } from "@/lib/client/api";
@@ -18,7 +18,8 @@ import { assistantContextText, createSession, historyForRequest, mergeBoardIndex
 import { cn, imageFileToDataUrl, speakableText } from "@/lib/utils";
 import { useVoiceInput, useVoiceOutput } from "@/lib/voice/hooks";
 import { Blur, Reveal } from "@/components/Motion";
-import { boardDelay, readingDelay } from "@/lib/tutor/pace";
+import { boardDelay, drawSpeed, readingDelay, stepPause } from "@/lib/tutor/pace";
+import { formatCountdown, useCountdown } from "@/lib/client/countdown";
 import { Badge, Button, ConfirmDialog, IconButton, Spinner } from "@/components/ui";
 import { SetupNotice } from "@/components/SetupNotice";
 import { Board } from "./Board";
@@ -47,7 +48,14 @@ interface Turn {
   /** The student cut the reply short at a check-in; skip whatever is left of it. */
   stopped: boolean;
   /** Question to ask once this turn has wrapped up (from a check-in answer). */
-  next?: string;
+  next?: { text: string; checkIn?: string };
+}
+
+interface AskOptions {
+  /** The message answers this check-in question; the tutor judges whether the student understood. */
+  checkIn?: string;
+  /** The student spoke this message, so keep the conversation going by voice. */
+  viaVoice?: boolean;
 }
 
 /** How the student answered a mid-lesson check-in. */
@@ -89,7 +97,21 @@ export function TutorWorkspace() {
   const turnRef = useRef<Turn | null>(null);
   const checkRef = useRef<((a: CheckAnswer) => void) | null>(null);
   const [checking, setChecking] = useState(false);
-  const askRef = useRef<(text: string) => Promise<void>>(async () => {});
+  const askRef = useRef<(text: string, opts?: AskOptions) => Promise<void>>(async () => {});
+  /** A closing check-in question the student hasn't answered yet; their next message answers it. */
+  const pendingCheckRef = useRef<string | null>(null);
+  /** The student is talking to the tutor; listen again after it asks them something. */
+  const voiceTurnRef = useRef(false);
+  const listenRef = useRef<() => void>(() => {});
+  const [cooldownUntil, setCooldownState] = useState<number | null>(null);
+  const cooldownRef = useRef<number | null>(null);
+  const setCooldownUntil = useCallback((until: number) => {
+    cooldownRef.current = until;
+    setCooldownState(until);
+  }, []);
+  const cooldownLeft = useCountdown(cooldownUntil);
+  const [fallback, setFallback] = useState<{ from: string; to: string; until: number } | null>(null);
+  const fallbackLeft = useCountdown(fallback?.until);
   const autoIdRef = useRef(0);
   const stepRef = useRef(0);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -198,11 +220,14 @@ export function TutorWorkspace() {
   );
 
   const ask = useCallback(
-    async (raw: string) => {
+    async (raw: string, opts: AskOptions = {}) => {
       const text = raw.trim();
       const s = sessionRef.current;
       if (!text || !s || busyRef.current) return;
+      if (cooldownRef.current && cooldownRef.current > Date.now()) return;
       busyRef.current = true;
+      pendingCheckRef.current = null;
+      voiceTurnRef.current = Boolean(opts.viaVoice);
       voiceOut.stop();
       const animate = !prefersReducedMotion();
       const pace = profile.pace ?? "normal";
@@ -272,6 +297,7 @@ export function TutorWorkspace() {
         profile: personalization.profile,
         excerpts,
         images: imgs,
+        ...(opts.checkIn && (s.mode === "explain" || s.mode === "simpler") ? { checkIn: { question: opts.checkIn.slice(0, 300) } } : {}),
       };
 
       const turn: Turn = {
@@ -302,7 +328,11 @@ export function TutorWorkspace() {
             break;
           case "say": {
             setStatus("streaming");
-            if (!turn.fast) await turn.speech;
+            if (!turn.fast) {
+              await turn.speech;
+              // Leave a beat between steps so each one can sink in.
+              if (sessionRef.current?.messages.find((m) => m.id === aId)?.steps?.length) await sleep(stepPause(pace));
+            }
             if (!turn.mute && !turn.fast) {
               turn.speech = voiceOut.speak(speakableText(ev.text), { voiceURI: profile.voice.uri, rate: profile.voice.rate });
             } else if (!turn.fast) {
@@ -346,6 +376,9 @@ export function TutorWorkspace() {
                   autoId: () => `item${++autoIdRef.current}`,
                   step,
                   animate: animate && !turn.fast,
+                  // Drawing is the lesson itself, so it follows the student's setting rather than reduced motion.
+                  handwriting: profile.drawAnimation !== false,
+                  ...(profile.drawAnimation !== false && !turn.fast ? { draw: { speed: drawSpeed(pace), skip: () => turn.fast || turn.stopped } } : {}),
                 });
                 turn.cursor = res.cursor;
                 if (res.cleared) {
@@ -372,15 +405,17 @@ export function TutorWorkspace() {
             if (turn.fast || (s.mode !== "explain" && s.mode !== "simpler")) break;
             await turn.speech;
             if (streamEnded && !arrived.slice(index + 1).some((t) => t === "say" || t === "board")) {
-              // Nothing left to pause before: show it as the closing question instead.
+              // Nothing left to pause before: show it as the closing question; the student's next message answers it.
               if (!turn.mute) turn.speech = voiceOut.speak(speakableText(ev.question), { voiceURI: profile.voice.uri, rate: profile.voice.rate });
               updateMessage(aId, (m) => ({ ...m, steps: [...(m.steps ?? []), { say: ev.question, actions: [] }] }));
+              pendingCheckRef.current = ev.question;
               break;
             }
             const lastSay = [...(sessionRef.current?.messages.find((m) => m.id === aId)?.steps ?? [])].reverse().find((st) => st.say)?.say ?? "";
             updateMessage(aId, (m) => ({ ...m, steps: [...(m.steps ?? []), { say: "", actions: [], check: { question: ev.question } }] }));
             if (!turn.mute) turn.speech = voiceOut.speak(speakableText(ev.question), { voiceURI: profile.voice.uri, rate: profile.voice.rate });
             setChecking(true);
+            if (voiceTurnRef.current && !turn.mute) void turn.speech.then(() => checkRef.current && listenRef.current());
             const answer = await new Promise<CheckAnswer>((resolve) => {
               checkRef.current = resolve;
             });
@@ -397,14 +432,24 @@ export function TutorWorkspace() {
             turn.stopped = true;
             voiceOut.stop();
             controller.abort();
-            turn.next =
-              answer.kind === "reply"
-                ? answer.text
-                : lastSay
-                  ? `I don't quite get this part yet: "${lastSay.slice(0, 300).trim()}" Can you explain it a different way?`
-                  : "I don't quite get this part yet. Can you explain it a different way?";
+            turn.next = {
+              text:
+                answer.kind === "reply"
+                  ? answer.text
+                  : lastSay
+                    ? `I don't quite get this part yet: "${lastSay.slice(0, 300).trim()}" Can you explain it a different way?`
+                    : "I don't quite get this part yet. Can you explain it a different way?",
+              checkIn: ev.question,
+            };
             break;
           }
+          case "verdict":
+            updateMessage(aId, (m) => ({ ...m, verdict: { understood: ev.understood, note: ev.note } }));
+            break;
+          case "fallback":
+            setFallback({ from: ev.from, to: ev.to, until: Date.now() + ev.retryAfterSec * 1000 });
+            updateMessage(aId, (m) => ({ ...m, servedBy: ev.to }));
+            break;
           case "followups":
             updateMessage(aId, (m) => ({ ...m, followups: ev.items }));
             break;
@@ -427,9 +472,12 @@ export function TutorWorkspace() {
           case "notice":
             updateMessage(aId, (m) => ({ ...m, notices: [...(m.notices ?? []), ev.message] }));
             break;
-          case "error":
-            updateMessage(aId, (m) => ({ ...m, error: { code: ev.code, message: ev.message, hint: ev.hint } }));
+          case "error": {
+            const retryAt = ev.code === "rate_limited" && ev.retryAfterSec ? Date.now() + ev.retryAfterSec * 1000 : undefined;
+            if (retryAt) setCooldownUntil(retryAt);
+            updateMessage(aId, (m) => ({ ...m, error: { code: ev.code, message: ev.message, hint: ev.hint, ...(retryAt ? { retryAt } : {}) } }));
             break;
+          }
           default:
             break;
         }
@@ -448,7 +496,9 @@ export function TutorWorkspace() {
         } else if (e.code === "aborted") {
           updateMessage(aId, (m) => ({ ...m, notices: [...(m.notices ?? []), "Stopped."] }));
         } else {
-          updateMessage(aId, (m) => ({ ...m, error: { code: e.code, message: e.message, hint: e.hint } }));
+          const retryAt = e.code === "rate_limited" ? Date.now() + (e.retryAfterSec ?? 30) * 1000 : undefined;
+          if (retryAt) setCooldownUntil(retryAt);
+          updateMessage(aId, (m) => ({ ...m, error: { code: e.code, message: e.message, hint: e.hint, ...(retryAt ? { retryAt } : {}) } }));
         }
       }
       streamEnded = true;
@@ -471,9 +521,13 @@ export function TutorWorkspace() {
       setStreamingId(null);
       abortRef.current = null;
       await persist();
-      if (turn.next) void askRef.current(turn.next);
+      if (turn.next) void askRef.current(turn.next.text, { checkIn: turn.next.checkIn, viaVoice: voiceTurnRef.current });
+      else if (pendingCheckRef.current && voiceTurnRef.current && !turn.mute) {
+        // The reply ended on a question: listen for the spoken answer.
+        void turn.speech.then(() => pendingCheckRef.current && !busyRef.current && listenRef.current());
+      }
     },
-    [attachments, mutate, personalization.profile, persist, profile, updateMessage, voiceOut],
+    [attachments, mutate, personalization.profile, persist, profile, setCooldownUntil, updateMessage, voiceOut],
   );
 
   /* Auto-send a question handed over from the Homework Solver. */
@@ -481,7 +535,7 @@ export function TutorWorkspace() {
     if (!seedQuestion || !session || !boardReady || !aiReady || seededRef.current === session.id) return;
     if (session.messages.length > 0) return;
     seededRef.current = session.id;
-    void ask(seedQuestion);
+    void Promise.resolve().then(() => ask(seedQuestion));
   }, [seedQuestion, session, boardReady, aiReady, ask]);
 
   useEffect(() => {
@@ -535,14 +589,15 @@ export function TutorWorkspace() {
 
   /** Answer a pending check-in, or ask normally when the lesson isn't paused. */
   const submit = useCallback(
-    (text: string) => {
+    (text: string, viaVoice = false) => {
       const hasFiles = attachments.some((a) => a.kind === "image" || a.status === "ready");
       const t = text.trim() || (hasFiles && !checkRef.current ? "Can you help me understand what I attached?" : "");
       if (!t) return;
       if (checkRef.current) {
         setInput("");
+        voiceTurnRef.current = viaVoice;
         checkRef.current({ kind: "reply", text: t });
-      } else void ask(t);
+      } else void ask(t, { checkIn: pendingCheckRef.current ?? undefined, viaVoice });
     },
     [ask, attachments],
   );
@@ -552,12 +607,17 @@ export function TutorWorkspace() {
   const voiceIn = useVoiceInput(
     useCallback(
       (text: string) => {
-        if (profile.voice.autoSend) submit(text);
+        if (profile.voice.autoSend) submit(text, true);
         else setInput((v) => (v ? `${v} ${text}` : text));
       },
       [submit, profile.voice.autoSend],
     ),
   );
+  useEffect(() => {
+    listenRef.current = () => {
+      if (!voiceIn.listening && profile.voice.autoSend) voiceIn.start();
+    };
+  }, [voiceIn, profile.voice.autoSend]);
   const toggleMic = () => {
     if (voiceIn.listening) voiceIn.stop();
     else {
@@ -814,14 +874,35 @@ export function TutorWorkspace() {
               onClose={() => setSourcesOpen(false)}
             />
           )}
+          {cooldownLeft > 0 ? (
+            <p role="status" className="mx-3 mb-1 flex items-center gap-2 rounded-xl bg-warning-soft px-3 py-2 text-[12.5px] text-warning">
+              <Hourglass className="size-3.5 shrink-0" aria-hidden />
+              <span>
+                Every model is at its usage limit. You can ask again in <strong className="tabular-nums">{formatCountdown(cooldownLeft)}</strong>.
+              </span>
+            </p>
+          ) : (
+            fallback &&
+            fallbackLeft > 0 && (
+              <p role="status" className="mx-3 mb-1 flex items-center gap-2 rounded-xl border border-border bg-surface-2 px-3 py-2 text-[12px] text-muted">
+                <Shuffle className="size-3.5 shrink-0" aria-hidden />
+                <span>
+                  Using <span className="font-medium text-ink-2">{fallback.to}</span> while {fallback.from} is at its limit — back in{" "}
+                  <span className="tabular-nums">{formatCountdown(fallbackLeft)}</span>.
+                </span>
+              </p>
+            )
+          )}
           <Composer
             value={input}
             onChange={setInput}
             onSubmit={() => submit(input)}
             onStop={stopGenerating}
             busy={busy && !checking}
-            disabled={!aiReady}
-            disabledReason={healthLoading ? "Connecting…" : "Connect an AI model to start (see setup above)"}
+            disabled={!aiReady || cooldownLeft > 0}
+            disabledReason={
+              cooldownLeft > 0 ? `Usage limit reached — back in ${formatCountdown(cooldownLeft)}` : healthLoading ? "Connecting…" : "Connect an AI model to start (see setup above)"
+            }
             mode={session.mode}
             onModeChange={setMode}
             voice={{ supported: voiceIn.supported, listening: voiceIn.listening, interim: voiceIn.interim, error: voiceIn.error, onToggle: toggleMic }}

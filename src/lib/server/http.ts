@@ -8,16 +8,18 @@ import { HttpError } from "./http-error";
 
 export { HttpError };
 
-export function jsonError(status: number, code: string, message: string, hint?: string, headers?: HeadersInit) {
-  return Response.json({ error: { code, message, ...(hint ? { hint } : {}) } }, { status, headers });
+export function jsonError(status: number, code: string, message: string, hint?: string, headers?: HeadersInit, retryAfterSec?: number) {
+  const h = new Headers(headers);
+  if (retryAfterSec !== undefined) h.set("Retry-After", String(retryAfterSec));
+  return Response.json({ error: { code, message, ...(hint ? { hint } : {}), ...(retryAfterSec !== undefined ? { retryAfterSec } : {}) } }, { status, headers: h });
 }
 
 export function errorResponse(err: unknown): Response {
-  if (err instanceof HttpError) return jsonError(err.status, err.code, err.message, err.hint);
+  if (err instanceof HttpError) return jsonError(err.status, err.code, err.message, err.hint, undefined, err.retryAfterSec);
   const ai = err instanceof AIError ? err : toAIError(err);
   // Log the code only — never request bodies, which contain student data.
   console.warn(`[chalkmind] AI request failed: ${ai.code}`);
-  return jsonError(ai.status, ai.code, ai.message, ai.hint);
+  return jsonError(ai.status, ai.code, ai.message, ai.hint, undefined, ai.retryAfterSec);
 }
 
 function clientKey(req: Request): string {
@@ -38,7 +40,7 @@ export async function guardAIRequest<S extends z.ZodType>(
 
   const rl = aiLimiter.check(userId ?? clientKey(req));
   if (!rl.ok) {
-    throw new HttpError(429, "rate_limited", `Too many requests. Try again in ${rl.retryAfterSec}s.`);
+    throw new HttpError(429, "rate_limited", `Too many requests. Try again in ${rl.retryAfterSec}s.`, undefined, rl.retryAfterSec);
   }
 
   const declared = Number(req.headers.get("content-length") ?? 0);

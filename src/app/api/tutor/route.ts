@@ -10,7 +10,8 @@ import { inlineTranscript, needsTranscription, transcribeImages } from "@/lib/ai
 export const maxDuration = 60;
 
 const MAX_BODY = 7 * 1024 * 1024;
-const HISTORY = 24;
+// Kept modest so a long session doesn't burn through a free tier's per-minute token limit.
+const HISTORY = 16;
 
 /**
  * POST /api/tutor — streams the tutor's reply as NDJSON events
@@ -79,6 +80,9 @@ export async function POST(req: Request) {
                 send(ev);
               }
             }
+          } else if (chunk.type === "fallback") {
+            send({ type: "fallback", from: chunk.from, to: chunk.to, retryAfterSec: chunk.retryAfterSec });
+            send({ type: "meta", provider: provider.id, model: chunk.to });
           } else if (chunk.type === "done") {
             truncated = chunk.finishReason === "length";
           }
@@ -97,7 +101,7 @@ export async function POST(req: Request) {
         if (!req.signal.aborted) {
           const ai = toAIError(err, provider.id);
           console.warn(`[chalkmind] tutor stream failed: ${ai.code}`);
-          send({ type: "error", code: ai.code, message: ai.message, hint: ai.hint });
+          send({ type: "error", code: ai.code, message: ai.message, hint: ai.hint, retryAfterSec: ai.retryAfterSec });
         }
       } finally {
         try {
