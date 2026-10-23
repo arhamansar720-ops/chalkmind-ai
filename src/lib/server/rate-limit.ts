@@ -30,4 +30,4 @@ export function createRateLimiter(limit: number, windowMs: number, maxKeys = 10_
 
 const perMinute = Number(process.env.RATE_LIMIT_PER_MINUTE);
 /** Shared limiter for all AI endpoints. */
-export const aiLimiter = createRateLimiter(Number.isFinite(perMinute) && perMinute > 0 ? perMinute : 20, 60_000);
+export const aiLimiter = createRateLimiter(Number.isFinite(perMinute) && perMinute > 0 ? perMinute : 40, 60_000);

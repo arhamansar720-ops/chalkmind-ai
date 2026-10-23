@@ -40,7 +40,12 @@ export interface StoredMessage {
   /** Files attached to this (user) message, for display. */
   attachments?: { name: string; kind: "image" | "document" }[];
   citations?: { source: string; page?: number; unit?: "slide" }[];
-  error?: { code: string; message: string; hint?: string };
+  /** The tutor's judgement of a check-in answer this reply responds to. */
+  verdict?: { understood: boolean; note?: string };
+  /** Set when a fallback model answered because the main one was rate-limited. */
+  servedBy?: string;
+  /** `retryAt`: when a rate-limited request can be sent again (ms timestamp). */
+  error?: { code: string; message: string; hint?: string; retryAt?: number };
   createdAt: number;
 }
 
@@ -143,6 +148,12 @@ export interface Profile extends BaseRecord {
   pace?: LessonPace;
   /** Remember facts and past lessons across sessions (default on). */
   memory?: boolean;
+  /** Custom instructions: what the tutor should know about the student. */
+  aboutMe?: string;
+  /** Custom instructions: how the student wants the tutor to talk to them. */
+  responseStyle?: string;
+  /** Draw board content stroke by stroke (default on, even with reduced motion). */
+  drawAnimation?: boolean;
 }
 
 export interface CollectionMap {
@@ -187,6 +198,6 @@ export const DEFAULT_PROFILE: Profile = {
   updatedAt: 0,
   style: "balanced",
   personalize: true,
-  voice: { rate: 1, autoSpeak: false, autoSend: true },
+  voice: { rate: 1, autoSpeak: true, autoSend: true },
   pace: "normal",
 };

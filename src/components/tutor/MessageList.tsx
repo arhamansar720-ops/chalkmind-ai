@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { BookOpenText, Brain, Check, HelpCircle, Lightbulb, MessageCircleQuestion, Paperclip, Shapes, Sparkles, SquareFunction, Table2, Type, Waypoints, LineChart, Highlighter, ImageIcon } from "lucide-react";
+import { BookOpenText, Brain, Check, CircleCheck, HelpCircle, Lightbulb, MessageCircleQuestion, RotateCcw, Paperclip, Shapes, Sparkles, SquareFunction, Table2, Type, Waypoints, LineChart, Highlighter, ImageIcon } from "lucide-react";
 import type { BoardAction } from "@/lib/board/schema";
 import type { StoredMessage, StoredStep } from "@/lib/store/types";
 import type { CheckAnswer } from "./TutorWorkspace";
@@ -135,6 +135,18 @@ function AssistantMessage({
       </span>
       <div className="min-w-0 flex-1">
         <p className="sr-only">Tutor:</p>
+        {m.verdict && (
+          <p
+            className={cn(
+              "animate-fade-up mb-2 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium",
+              m.verdict.understood ? "bg-success-soft text-success" : "bg-warning-soft text-warning",
+            )}
+            title={m.verdict.note}
+          >
+            {m.verdict.understood ? <CircleCheck className="size-3.5" aria-hidden /> : <RotateCcw className="size-3.5" aria-hidden />}
+            {m.verdict.understood ? "You've got it" : "Not quite yet — let's go over it again"}
+          </p>
+        )}
         {steps.length === 0 && streaming && (
           <p className="flex items-center gap-2 text-[13.5px] text-muted">
             <span className="flex gap-1" aria-hidden>
@@ -199,6 +211,10 @@ function AssistantMessage({
               {m.citations.map((c) => `${c.source}${c.page ? `, ${c.unit === "slide" ? "slide" : "p."} ${c.page}` : ""}`).join(" · ")}
             </span>
           </div>
+        )}
+
+        {m.servedBy && (
+          <p className="mt-2 text-[11.5px] text-muted">Answered by {m.servedBy} while the main model was at its usage limit.</p>
         )}
 
         {m.notices && m.notices.length > 0 && (
@@ -274,12 +290,12 @@ function CheckIn({ check, onCheck }: { check: NonNullable<StoredStep["check"]>; 
               <HelpCircle className="size-3.5" /> Not quite
             </button>
           </div>
-          <p className="mt-2 text-[12px] text-muted">The lesson is paused. You can also type or say what&apos;s confusing.</p>
+          <p className="mt-2 text-[12px] text-muted">The lesson is paused. Type or say your answer and the tutor will check it.</p>
         </>
       ) : (
         check.answer && (
           <p className="mt-1 pl-6 text-[12px] text-muted">
-            {check.answer === "yes" ? "You said you've got it." : check.answer === "no" ? "You asked for another explanation." : "You replied below."}
+            {check.answer === "yes" ? "You said you've got it." : check.answer === "no" ? "You asked for another explanation." : "You answered — the tutor checks it below."}
           </p>
         )
       )}

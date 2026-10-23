@@ -53,10 +53,12 @@ const SYMBOLS: [RegExp, string][] = [
 const mapChars = (s: string, table: Record<string, string>) =>
   [...s].every((c) => table[c]) ? [...s].map((c) => table[c]).join("") : null;
 
-export function texToUnicode(input: string): string {
+export function texToUnicode(raw: string): string {
+  // The handwriting font has no minus sign (U+2212); a fallback glyph gets clipped.
+  const input = raw.replace(/\u2212/g, "-");
   if (!/[\\$^_]/.test(input)) return input;
   let s = input.replace(/\$\$?([^$]*)\$\$?/g, "$1");
-  s = s.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "($1)/($2)").replace(/\((\w)\)\/\((\w)\)/g, "$1/$2");
+  s = s.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "($1)/($2)").replace(/\(([\w.]+)\)\//g, "$1/").replace(/\/\(([\w.]+)\)/g, "/$1");
   s = s.replace(/\\sqrt\{([^{}]+)\}/g, (_, a: string) => (a.length === 1 ? `√${a}` : `√(${a})`));
   s = s.replace(/\\text\{([^{}]*)\}|\\mathrm\{([^{}]*)\}/g, (_, a?: string, b?: string) => a ?? b ?? "");
   s = s.replace(/\^\{?\\circ\}?/g, "°");
@@ -65,4 +67,21 @@ export function texToUnicode(input: string): string {
   s = s.replace(/_\{([^{}]+)\}|_([A-Za-z0-9])/g, (m, a?: string, b?: string) => mapChars(a ?? b ?? "", SUB) ?? m);
   s = s.replace(/\\left|\\right|\\,|\\;|\\!|\\quad/g, " ").replace(/\\([{}])/g, "$1");
   return s.replace(/[ \t]{2,}/g, " ").trim();
+}
+
+/** Constructs that only read well typeset (stacked, two-dimensional or decorated math). */
+const TYPESET_ONLY = /\\(?:begin|matrix|pmatrix|int|iint|oint|sum|prod|lim|overline|underline|vec|hat|bar|binom|over|cases|overbrace|underbrace)\b/;
+
+/**
+ * The equation as a line a person would write by hand on a whiteboard, or
+ * null when it needs real typesetting (nested fractions, integrals, matrices…).
+ */
+export function handwrittenMath(latex: string): string | null {
+  if (TYPESET_ONLY.test(latex)) return null;
+  // A fraction inside a fraction (or a long one) gets confusing on one line.
+  const fracs = latex.match(/\\[dt]?frac/g)?.length ?? 0;
+  if (fracs > 1 || /\\[dt]?frac\{[^{}]{9,}\}|\\[dt]?frac\{[^{}]*\}\{[^{}]{9,}\}/.test(latex)) return null;
+  const s = texToUnicode(latex.replace(/\\[dt]frac/g, "\\frac"));
+  if (/[\\{}^_]/.test(s) || s.length === 0 || s.length > 64) return null;
+  return s;
 }

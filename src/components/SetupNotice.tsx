@@ -2,6 +2,7 @@
 
 import { KeyRound, RefreshCw } from "lucide-react";
 import type { PublicConfig } from "@/lib/ai/config";
+import { formatCountdown, useCountdown } from "@/lib/client/countdown";
 import { Alert, Button, Card } from "./ui";
 
 /** Shown in place of AI features when no provider is configured. No fake answers. */
@@ -55,20 +56,21 @@ AI_MODEL=qwen3`}</pre>
   );
 }
 
-export function ErrorNotice({ error, onRetry }: { error: { code?: string; message: string; hint?: string }; onRetry?: () => void }) {
+export function ErrorNotice({ error, onRetry }: { error: { code?: string; message: string; hint?: string; retryAt?: number }; onRetry?: () => void }) {
+  const wait = useCountdown(error.retryAt);
   return (
     <Alert
       tone={error.code === "rate_limited" ? "warning" : "danger"}
       title={error.code === "not_configured" ? "AI isn't set up yet" : undefined}
       action={
         onRetry && (
-          <Button size="sm" variant="secondary" onClick={onRetry}>
-            Try again
+          <Button size="sm" variant="secondary" onClick={onRetry} disabled={wait > 0}>
+            {wait > 0 ? `Try again in ${formatCountdown(wait)}` : "Try again"}
           </Button>
         )
       }
     >
-      {error.message}
+      {error.retryAt ? (wait > 0 ? `Usage limit reached. You can ask again in ${formatCountdown(wait)}.` : "The usage limit has reset — you can ask again now.") : error.message}
       {error.hint && <span className="mt-1 block text-xs opacity-80">{error.hint}</span>}
     </Alert>
   );

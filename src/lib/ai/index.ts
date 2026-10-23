@@ -1,12 +1,14 @@
 import "server-only";
 import { readAIConfig, type AIConfig } from "./config";
 import { AIError } from "./errors";
+import { FallbackProvider } from "./fallback";
 import { AnthropicProvider } from "./providers/anthropic";
 import { OpenAICompatibleProvider } from "./providers/openai-compatible";
 import type { AIProvider, GenerateRequest } from "./types";
 
 export function createProvider(cfg: AIConfig): AIProvider {
-  return cfg.provider === "anthropic" ? new AnthropicProvider(cfg) : new OpenAICompatibleProvider(cfg);
+  const base = cfg.provider === "anthropic" ? new AnthropicProvider(cfg) : new OpenAICompatibleProvider(cfg);
+  return cfg.fallbackModels.length ? new FallbackProvider(base, cfg.fallbackModels) : base;
 }
 
 /** The configured provider, or an AIError("not_configured") the UI turns into a setup screen. */

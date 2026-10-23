@@ -116,3 +116,25 @@ describe("memory in the prompt", () => {
     expect(on).toContain('"t":"remember"');
   });
 });
+
+describe("check-in verdicts", () => {
+  it("parses the tutor's judgement of a check-in answer", async () => {
+    const { modelObjectToEvents, parseTutorEvent } = await import("@/lib/tutor/protocol");
+    expect(modelObjectToEvents({ t: "verdict", understood: false, note: "mixed up sides" })).toEqual([
+      { type: "verdict", understood: false, note: "mixed up sides" },
+    ]);
+    expect(modelObjectToEvents({ t: "verdict", understood: "true" })).toEqual([{ type: "verdict", understood: true, note: undefined }]);
+    expect(parseTutorEvent('{"type":"fallback","from":"a","to":"b","retryAfterSec":30}')).toEqual({ type: "fallback", from: "a", to: "b", retryAfterSec: 30 });
+  });
+
+  it("asks the model to judge only when the message answers a check-in", async () => {
+    const { tutorRequestSchema } = await import("@/lib/tutor/protocol");
+    const { tutorSystemPrompt } = await import("@/lib/tutor/prompt");
+    const base = tutorRequestSchema.parse({ messages: [{ role: "user", content: "because it cancels the +3" }] });
+    expect(tutorSystemPrompt(base, false)).not.toContain("Judge the student's check-in answer");
+    const answering = tutorRequestSchema.parse({ ...base, checkIn: { question: "Why subtract 3?" } });
+    const prompt = tutorSystemPrompt(answering, false);
+    expect(prompt).toContain("Judge the student's check-in answer");
+    expect(prompt).toContain("Why subtract 3?");
+  });
+});

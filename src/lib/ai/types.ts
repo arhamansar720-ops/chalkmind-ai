@@ -21,6 +21,8 @@ export interface GenerateRequest {
   vision?: boolean;
   /** Reasoning budget for reasoning models that accept one (ignored elsewhere). */
   effort?: "none" | "low" | "medium" | "high";
+  /** Use this model instead of the configured one (set by the rate-limit fallback). */
+  model?: string;
   signal?: AbortSignal;
 }
 
@@ -28,6 +30,8 @@ export type StreamChunk =
   | { type: "text"; text: string }
   /** The model is reasoning; content is not exposed. */
   | { type: "thinking" }
+  /** The main model is rate-limited; this reply comes from a fallback model instead. */
+  | { type: "fallback"; from: string; to: string; retryAfterSec: number }
   | { type: "done"; finishReason: "stop" | "length" | "other" };
 
 export interface AIProvider {

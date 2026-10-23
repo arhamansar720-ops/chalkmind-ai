@@ -10,7 +10,7 @@ import type {
 } from "./schema";
 import { FILL, FONT, HIGHLIGHT, SERIES, STROKE } from "./palette";
 import { autoYRange, compileFunction, formatTick, sampleFunction, ticks } from "./graph";
-import { texToUnicode as tu } from "./text";
+import { handwrittenMath, texToUnicode as tu } from "./text";
 
 /**
  * Turns validated board actions into Excalidraw element *skeletons* (the input
@@ -59,6 +59,8 @@ export interface LayoutContext {
   lookup: (id: string) => Bounds | null;
   /** Pre-rendered equation images, by LaTeX source. */
   equation: (latex: string) => PreparedEquation | undefined;
+  /** Write simple equations in the handwriting font instead of as typeset images. */
+  handwriting?: boolean;
   /** Fresh unique Excalidraw element id. */
   newId: () => string;
   /** Fresh tutor-facing id for blocks the model didn't name. */
@@ -215,9 +217,10 @@ export function layoutStep(actions: BoardAction[], ctx: LayoutContext): LayoutRe
       }
       case "add_equation": {
         const cmId = action.id ?? ctx.autoId();
-        const eq = ctx.equation(action.latex);
-        const out = equationBlock(action, eq);
-        if (!eq) warnings.push(`Equation shown as plain text (could not render): ${action.latex.slice(0, 40)}`);
+        const hand = ctx.handwriting ? handwrittenMath(action.latex) : null;
+        const eq = hand ? undefined : ctx.equation(action.latex);
+        const out = equationBlock(action, eq, hand);
+        if (!eq && !hand) warnings.push(`Equation shown as plain text (could not render): ${action.latex.slice(0, 40)}`);
         const b = place(out.width, out.height, action.place);
         skeletons.push(...out.build(b.x, b.y, base(cmId, action.type), ctx.newId));
         register(cmId, action.type, summary, b);
@@ -434,12 +437,16 @@ function textBlock(a: AddTextAction): BlockOut {
   };
 }
 
-function equationBlock(a: AddEquationAction, eq: PreparedEquation | undefined): BlockOut {
+const HAND_MATH_SIZE = 32;
+
+function equationBlock(a: AddEquationAction, eq: PreparedEquation | undefined, hand: string | null = null): BlockOut {
   const noteLines = a.note ? wrapText(`← ${tu(a.note)}`, 18, 300) : [];
   const note = measureText(noteLines, 18);
-  const body = eq
-    ? { width: eq.width, height: eq.height }
-    : measureText(wrapText(a.latex, 18), 18);
+  const body = hand
+    ? measureText([hand], HAND_MATH_SIZE)
+    : eq
+      ? { width: eq.width, height: eq.height }
+      : measureText(wrapText(a.latex, 18), 18);
   const width = body.width + (a.note ? 36 + note.width : 0);
   const height = Math.max(body.height, a.note ? note.height : 0);
   return {
@@ -447,7 +454,19 @@ function equationBlock(a: AddEquationAction, eq: PreparedEquation | undefined): 
     height,
     build: (x, y, base, newId) => {
       const out: Skeleton[] = [];
-      if (eq) {
+      if (hand) {
+        out.push({
+          type: "text",
+          id: newId(),
+          x,
+          y: y + (height - body.height) / 2,
+          text: hand,
+          fontSize: HAND_MATH_SIZE,
+          fontFamily: FONT.hand,
+          strokeColor: STROKE[a.color ?? "ink"],
+          ...base,
+        });
+      } else if (eq) {
         out.push({
           type: "image",
           id: newId(),

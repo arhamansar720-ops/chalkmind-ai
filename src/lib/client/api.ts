@@ -8,6 +8,8 @@ export class ApiError extends Error {
     message: string,
     readonly hint?: string,
     readonly status = 0,
+    /** For rate limits: seconds until requests are accepted again. */
+    readonly retryAfterSec?: number,
   ) {
     super(message);
   }
@@ -24,12 +26,15 @@ export const UNAUTHORIZED_EVENT = "chalkmind:unauthorized";
 
 async function toApiError(res: Response): Promise<ApiError> {
   if (res.status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
-  const body = (await res.json().catch(() => null)) as { error?: { code?: string; message?: string; hint?: string } } | null;
+  const body = (await res.json().catch(() => null)) as { error?: { code?: string; message?: string; hint?: string; retryAfterSec?: number } } | null;
+  const header = Number(res.headers.get("retry-after"));
+  const retryAfterSec = typeof body?.error?.retryAfterSec === "number" ? body.error.retryAfterSec : Number.isFinite(header) && header > 0 ? header : undefined;
   return new ApiError(
     body?.error?.code ?? "http_error",
     body?.error?.message ?? `Request failed (HTTP ${res.status}).`,
     body?.error?.hint,
     res.status,
+    retryAfterSec,
   );
 }
 
