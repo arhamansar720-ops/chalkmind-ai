@@ -39,7 +39,7 @@ export interface StoredMessage {
   remembered?: string[];
   /** Files attached to this (user) message, for display. */
   attachments?: { name: string; kind: "image" | "document" }[];
-  citations?: { source: string; page?: number; unit?: "slide" }[];
+  citations?: { source: string; page?: number; unit?: "slide" | "section" }[];
   /** The tutor's judgement of a check-in answer this reply responds to. */
   verdict?: { understood: boolean; note?: string };
   /** Set when a fallback model answered because the main one was rate-limited. */

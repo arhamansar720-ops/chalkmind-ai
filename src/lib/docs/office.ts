@@ -76,6 +76,40 @@ export function drawingText(xml: string): string {
     .join("\n");
 }
 
+/** A DrawingML table as Markdown-style rows ("| a | b |"), so cells stay paired. */
+export function drawingTable(xml: string): string {
+  const rows = xml.match(/<a:tr[\s>][\s\S]*?<\/a:tr>/g) ?? [];
+  return rows
+    .map((r) => (r.match(/<a:tc[\s>][\s\S]*?<\/a:tc>/g) ?? []).map((c) => drawingText(c).replace(/\n/g, " ").replace(/\|/g, "/")))
+    .filter((cells) => cells.some(Boolean))
+    .map((cells) => `| ${cells.join(" | ")} |`)
+    .join("\n");
+}
+
+/**
+ * Slide text in reading order: the title first (marked with "#"), then other
+ * shapes, with tables kept as rows instead of loose cells.
+ */
+export function slideText(xml: string): string {
+  const tables: string[] = [];
+  const withoutTables = xml.replace(/<a:tbl>[\s\S]*?<\/a:tbl>/g, (t) => {
+    tables.push(drawingTable(t));
+    return "";
+  });
+  const shapes = withoutTables.match(/<p:sp>[\s\S]*?<\/p:sp>/g) ?? [];
+  let title = "";
+  const body: string[] = [];
+  for (const sp of shapes) {
+    const text = drawingText(sp);
+    if (!text) continue;
+    if (!title && /<p:ph[^>]*type="(?:title|ctrTitle)"/.test(sp)) title = text.replace(/\n/g, " ");
+    else body.push(text);
+  }
+  // Text outside <p:sp> (e.g. inside graphic frames) that the shape pass missed.
+  if (shapes.length === 0) body.push(drawingText(withoutTables));
+  return [title && `# ${title}`, ...body, ...tables].filter(Boolean).join("\n");
+}
+
 /** One page per slide: slide text, then speaker notes. */
 export function extractPptx(buf: Uint8Array): PageText[] {
   assertZipBudget(buf);
@@ -93,7 +127,7 @@ export function extractPptx(buf: Uint8Array): PageText[] {
     .sort((a, b) => a - b);
   // Notes are linked by number in the common case (notesSlideN ↔ slideN).
   const pages = slideNums.map((n, i) => {
-    const body = drawingText(dec.decode(files[`ppt/slides/slide${n}.xml`]));
+    const body = slideText(dec.decode(files[`ppt/slides/slide${n}.xml`]));
     const notesXml = files[`ppt/notesSlides/notesSlide${n}.xml`];
     // Notes slides repeat the slide number placeholder; drop bare numbers.
     const notes = notesXml
@@ -108,17 +142,63 @@ export function extractPptx(buf: Uint8Array): PageText[] {
   return pages;
 }
 
-/** DOCX → text (via mammoth), split into ~section-sized pages for search. */
+const stripTags = (s: string) => decodeXml(s.replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "")).replace(/[ \t]+/g, " ").trim();
+
+/**
+ * Mammoth's HTML → readable text that keeps structure: "#" headings, "-"
+ * list items, and tables as "| a | b |" rows.
+ */
+export function htmlToStructuredText(html: string): string {
+  const out: string[] = [];
+  const re = /<(h[1-6]|p|li|table)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    const tag = m[1].toLowerCase();
+    if (tag === "table") {
+      const rows = (m[2].match(/<tr\b[^>]*>[\s\S]*?<\/tr>/gi) ?? [])
+        .map((r) => (r.match(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi) ?? []).map((c) => stripTags(c).replace(/\n/g, " ").replace(/\|/g, "/")))
+        .filter((cells) => cells.some(Boolean))
+        .map((cells) => `| ${cells.join(" | ")} |`);
+      if (rows.length) out.push(rows.join("\n"));
+      continue;
+    }
+    const text = stripTags(m[2]);
+    if (!text) continue;
+    if (tag[0] === "h") out.push(`${"#".repeat(Math.min(3, Number(tag[1])))} ${text}`);
+    else if (tag === "li") out.push(`- ${text}`);
+    else out.push(text);
+  }
+  return out.join("\n\n");
+}
+
+/** Split structured text into sections at top-level headings (~1 page each), so citations can point somewhere useful. */
+export function splitSections(text: string, maxChars = 6000): PageText[] {
+  const blocks = text.split(/\n(?=#{1,2} )/);
+  const pages: string[] = [];
+  let cur = "";
+  for (const b of blocks) {
+    if (cur && (cur.length + b.length > maxChars || /^#{1,2} /.test(b))) {
+      pages.push(cur);
+      cur = "";
+    }
+    cur = cur ? `${cur}\n${b}` : b;
+  }
+  if (cur.trim()) pages.push(cur);
+  return pages.map((t, i) => ({ page: i + 1, text: t.trim() })).filter((p) => p.text);
+}
+
+/** DOCX → structured text (via mammoth's HTML), split into sections. */
 export async function extractDocx(buf: Uint8Array): Promise<PageText[]> {
   assertZipBudget(buf);
   const mammoth = await import("mammoth");
-  let text: string;
+  let html: string;
   try {
-    ({ value: text } = await mammoth.extractRawText({ buffer: Buffer.from(buf) }));
+    // Images are dropped: we only need the text.
+    ({ value: html } = await mammoth.convertToHtml({ buffer: Buffer.from(buf) }, { convertImage: mammoth.images.imgElement(async () => ({ src: "" })) }));
   } catch {
     throw new OfficeError("corrupt", "This document couldn't be read. It may be damaged.");
   }
-  text = text.replace(/\n{3,}/g, "\n\n").trim();
-  if (text.length < 2) throw new OfficeError("no_text", "No text was found in this document.");
-  return [{ page: 1, text }];
+  const text = htmlToStructuredText(html);
+  if (text.replace(/[#|\-\s]/g, "").length < 2) throw new OfficeError("no_text", "No text was found in this document.");
+  return splitSections(text);
 }

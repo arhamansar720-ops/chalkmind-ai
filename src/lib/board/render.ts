@@ -3,7 +3,7 @@
 import type { ExcalidrawElement, FileId } from "@excalidraw/excalidraw/element/types";
 import type { BinaryFileData, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElementSkeleton } from "@excalidraw/excalidraw/data/transform";
-import { cursorBelow, layoutStep, type Bounds, type Cursor, type PreparedEquation, type RegisteredItem } from "./layout";
+import { BLOCK_GAP, COLUMN_PITCH, cursorBelow, layoutStep, nudgeRight, resolvePlacement, type Bounds, type Cursor, type PreparedEquation, type RegisteredItem } from "./layout";
 import { hashString, renderEquation, svgToDataURL } from "./math-svg";
 import { handwrittenMath } from "./text";
 import type { BoardAction } from "./schema";
@@ -24,10 +24,15 @@ function boundsOf(lib: ExcalidrawLib, els: readonly ExcalidrawElement[]): Bounds
 
 /** Cursor below everything currently on the board. */
 export function cursorForScene({ api, lib }: BoardHandle): Cursor {
+  // The latest column the tutor wrote in (customData.cmX0), below whatever is already in it.
   const els = api.getSceneElements();
-  const b = boundsOf(lib, els);
-  if (!b) return cursorBelow([]);
-  return cursorBelow([b], Math.min(0, b.x));
+  const all = boundsOf(lib, els);
+  if (!all) return cursorBelow([]);
+  const top = Math.min(0, all.y);
+  const cols = els.map((e) => e.customData?.cmX0).filter((v): v is number => typeof v === "number");
+  const x0 = cols.length ? Math.max(...cols) : Math.min(0, all.x);
+  const col = boundsOf(lib, els.filter((e) => e.x < x0 + COLUMN_PITCH && e.x + e.width > x0));
+  return { x0, top, bottom: col ? col.y + col.height + BLOCK_GAP : top, last: null };
 }
 
 /** Bounds of content the tutor drew earlier, found by its id in element customData. */
@@ -104,8 +109,12 @@ export async function renderActions(handle: BoardHandle, actions: BoardAction[],
     step: opts.step,
   });
 
-  const created = lib.convertToExcalidrawElements(result.skeletons as unknown as ExcalidrawElementSkeleton[], { regenerateIds: false });
+  const converted = lib.convertToExcalidrawElements(result.skeletons as unknown as ExcalidrawElementSkeleton[], { regenerateIds: false });
   const before = result.clear ? [] : api.getSceneElements();
+  const placed = place(handle, converted, before, actions[actions.length - 1]?.type, result.clear ? { ...cursorBelow([]), top: 0 } : opts.cursor);
+  const created = placed.created;
+  const cursor = placed.cursor ?? result.cursor;
+  const registered = result.registered.map((r) => ({ ...r, bounds: { ...r.bounds, x: r.bounds.x + placed.dx, y: r.bounds.y + placed.dy } }));
 
   // Bring the spot being drawn on into view first, so the student watches it appear.
   const focusEls = result.focus
@@ -130,7 +139,49 @@ export async function renderActions(handle: BoardHandle, actions: BoardAction[],
     const kept = result.clear ? current.map((el) => lib.newElementWith(el, { isDeleted: true })) : current;
     api.updateScene({ elements: [...kept, ...created], captureUpdate: lib.CaptureUpdateAction.IMMEDIATELY });
   }
-  return { cursor: result.cursor, registered: result.registered, warnings: result.warnings, cleared: result.clear };
+  return { cursor, registered, warnings: result.warnings, cleared: result.clear };
+}
+
+const FLOW_KINDS = new Set(["add_text", "add_equation", "add_shape", "add_diagram", "add_graph", "add_table"]);
+
+/**
+ * Measured placement. Layout positions blocks from estimated sizes; after
+ * conversion Excalidraw has measured the text for real, so push the block
+ * clear of anything it would overlap and wrap to a new column when the
+ * current one is full. Highlight notes are only nudged sideways.
+ */
+function place(
+  { lib }: BoardHandle,
+  converted: ExcalidrawElement[],
+  existing: readonly ExcalidrawElement[],
+  kind: string | undefined,
+  start: Cursor,
+): { created: ExcalidrawElement[]; dx: number; dy: number; cursor: Cursor | null } {
+  const obstacles = existing.map((e) => boundsOf(lib, [e])).filter((b): b is Bounds => Boolean(b && b.width + b.height > 0));
+  if (converted.length && kind && FLOW_KINDS.has(kind)) {
+    const real = boundsOf(lib, converted)!;
+    const p = resolvePlacement(real, obstacles, start);
+    const created = converted.map((e) => lib.newElementWith(e, { x: e.x + p.dx, y: e.y + p.dy, customData: { ...e.customData, cmX0: p.x0 } }));
+    const moved = { ...real, x: real.x + p.dx, y: real.y + p.dy };
+    const sameColumn = p.x0 === start.x0;
+    return {
+      created,
+      dx: p.dx,
+      dy: p.dy,
+      cursor: { x0: p.x0, top: start.top ?? 0, bottom: sameColumn ? Math.max(moved.y + moved.height, start.bottom) : moved.y + moved.height, last: moved },
+    };
+  }
+  if (converted.length && kind === "highlight") {
+    const notes = converted.filter((e) => e.type === "text");
+    const created = converted.map((e) => {
+      if (e.type !== "text") return e;
+      const others = notes.filter((n) => n.id !== e.id).map((n) => boundsOf(lib, [n])!);
+      const dx = nudgeRight(boundsOf(lib, [e])!, [...obstacles, ...others]);
+      return dx ? lib.newElementWith(e, { x: e.x + dx }) : e;
+    });
+    return { created, dx: 0, dy: 0, cursor: null };
+  }
+  return { created: converted, dx: 0, dy: 0, cursor: null };
 }
 
 let fontsLoading: Promise<unknown> | null = null;
@@ -164,7 +215,22 @@ function pencilElement({ api, lib }: BoardHandle): ExcalidrawElement | null {
   return el ?? null;
 }
 
-const nextFrame = () => new Promise<number>((r) => requestAnimationFrame(r));
+/**
+ * Next animation frame, raced against a timer: browsers pause or throttle
+ * requestAnimationFrame for hidden/occluded pages, which would stall the
+ * lesson mid-drawing. Stroke progress is time-based either way.
+ */
+const nextFrame = () =>
+  new Promise<number>((r) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      r(performance.now());
+    };
+    if (typeof document === "undefined" || !document.hidden) requestAnimationFrame(finish);
+    setTimeout(finish, 100);
+  });
 
 const naturalSizes = new Map<string, Promise<{ w: number; h: number } | null>>();
 function naturalSize(dataURL: string): Promise<{ w: number; h: number } | null> {

@@ -44,6 +44,8 @@ export interface Cursor {
   bottom: number;
   /** The most recently placed block, for place: "right". */
   last: Bounds | null;
+  /** Top of the lesson area: new columns start here. */
+  top?: number;
 }
 
 export interface RegisteredItem {
@@ -80,7 +82,11 @@ export interface LayoutResult {
 }
 
 export const COLUMN_WIDTH = 820;
-const BLOCK_GAP = 34;
+/** Horizontal distance between lesson columns (content plus side notes plus a gutter). */
+export const COLUMN_PITCH = 1180;
+/** A column wraps to the next one once it grows past this height, like a real board. */
+export const COLUMN_MAX_HEIGHT = 1100;
+export const BLOCK_GAP = 34;
 const SECTION_GAP = 64;
 const CHAR_W = 0.53; // average glyph width as a fraction of font size
 const LINE_H = 1.25;
@@ -102,6 +108,54 @@ export function cursorBelow(elements: Bounds[], x0 = 0): Cursor {
   if (elements.length === 0) return emptyCursor();
   const bottom = Math.max(...elements.map((e) => e.y + e.height));
   return { x0, bottom: bottom + SECTION_GAP - BLOCK_GAP, last: null };
+}
+
+const intersects = (a: Bounds, b: Bounds, gap: number) =>
+  a.x < b.x + b.width + gap && a.x + a.width + gap > b.x && a.y < b.y + b.height + gap && a.y + a.height + gap > b.y;
+
+export interface Placement {
+  dx: number;
+  dy: number;
+  /** Column the block ended up in. */
+  x0: number;
+}
+
+/**
+ * Final position for a block given its *measured* bounds: push it below
+ * anything it would overlap, and wrap to a new column (to the right, back at
+ * the top) when the current column is full — so the board fills like a real
+ * whiteboard instead of one endless strip.
+ */
+export function resolvePlacement(block: Bounds, obstacles: Bounds[], cursor: Cursor, gap = 22): Placement {
+  const top = cursor.top ?? 0;
+  let x0 = cursor.x0;
+  let x = block.x;
+  let y = block.y;
+  for (let i = 0; i < 80; i++) {
+    const overflows = y + block.height > top + COLUMN_MAX_HEIGHT && y > top + 1 && block.height < COLUMN_MAX_HEIGHT;
+    if (overflows) {
+      x += COLUMN_PITCH;
+      x0 += COLUMN_PITCH;
+      y = top;
+      continue;
+    }
+    const r = { x, y, width: block.width, height: block.height };
+    const hits = obstacles.filter((o) => intersects(r, o, gap));
+    if (hits.length === 0) break;
+    y = Math.max(...hits.map((h) => h.y + h.height)) + gap;
+  }
+  return { dx: x - block.x, dy: y - block.y, x0 };
+}
+
+/** Horizontal shift that moves a side note clear of other content (notes stay on their row). */
+export function nudgeRight(block: Bounds, obstacles: Bounds[], gap = 16): number {
+  let x = block.x;
+  for (let i = 0; i < 20; i++) {
+    const hits = obstacles.filter((o) => intersects({ ...block, x }, o, gap));
+    if (hits.length === 0) break;
+    x = Math.max(...hits.map((h) => h.x + h.width)) + gap;
+  }
+  return x - block.x;
 }
 
 export function wrapText(text: string, fontSize: number, maxWidth = COLUMN_WIDTH): string[] {

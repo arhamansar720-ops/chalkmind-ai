@@ -6,7 +6,7 @@ import { BookmarkPlus, Check, CheckCircle2, Hourglass, MessagesSquare, PencilRul
 import { boardIndexFromElements, emptyCursor, type Cursor, type RegisteredItem } from "@/lib/board/layout";
 import { clearScene, cursorForScene, renderActions, snapshotScene, type BoardHandle } from "@/lib/board/render";
 import { ApiError, postJSON, streamTutor } from "@/lib/client/api";
-import { attachmentKind, ingestDocument, leadExcerpts, retrieveExcerpts, type Excerpt } from "@/lib/client/documents";
+import { attachedExcerpts, attachmentKind, ingestDocument, retrieveExcerpts, type Excerpt } from "@/lib/client/documents";
 import type { ComposerAttachment } from "./Composer";
 import { MAX_IMAGES } from "@/lib/tutor/protocol";
 import { useHealth } from "@/lib/client/health";
@@ -19,7 +19,7 @@ import { assistantContextText, createSession, historyForRequest, mergeBoardIndex
 import { cn, imageFileToDataUrl, speakableText } from "@/lib/utils";
 import { useVoiceInput, useVoiceOutput } from "@/lib/voice/hooks";
 import { Blur, Reveal } from "@/components/Motion";
-import { boardDelay, drawSpeed, readingDelay, stepPause } from "@/lib/tutor/pace";
+import { boardDelay, drawSpeed, readingDelay, revealPoints, stepPause } from "@/lib/tutor/pace";
 import { formatCountdown, useCountdown } from "@/lib/client/countdown";
 import { Badge, Button, ConfirmDialog, IconButton, Spinner } from "@/components/ui";
 import { SetupNotice } from "@/components/SetupNotice";
@@ -108,6 +108,8 @@ export function TutorWorkspace() {
   const turnRef = useRef<Turn | null>(null);
   const checkRef = useRef<((a: CheckAnswer) => void) | null>(null);
   const [checking, setChecking] = useState(false);
+  /** The step currently being written out in the chat (word by word). */
+  const [typing, setTyping] = useState<{ id: string; step: number; chars: number } | null>(null);
   const askRef = useRef<(text: string, opts?: AskOptions) => Promise<void>>(async () => {});
   /** A closing check-in question the student hasn't answered yet; their next message answers it. */
   const pendingCheckRef = useRef<string | null>(null);
@@ -278,14 +280,18 @@ export function TutorWorkspace() {
           const lastTutor = [...prior].reverse().find((m) => m.role === "assistant")?.content ?? "";
           const r = await retrieveExcerpts(docIds, `${text} ${lastTutor.slice(0, 300)}`);
           // Files attached with this question are about this question: always include their opening.
-          const lead = newDocIds.length ? await leadExcerpts(newDocIds) : [];
+          const lead = newDocIds.length ? await attachedExcerpts(newDocIds) : [];
           const key = (e: Excerpt) => `${e.source}#${e.page}#${e.text.slice(0, 40)}`;
           const merged = new Map<string, Excerpt>();
           for (const e of [...lead, ...r.excerpts]) if (!merged.has(key(e))) merged.set(key(e), e);
           excerpts = [...merged.values()].slice(0, 8);
           const seen = new Set<string>();
           citations = excerpts
-            .map((e) => ({ source: e.source, page: e.page, ...(e.unit ? { unit: e.unit } : {}) }))
+            .flatMap((e) => {
+              // Packed excerpts carry "[Slide N]" / "[Section N]" labels for every part they include.
+              const labelled = [...e.text.matchAll(/\[(?:Slide|Section) (\d+)\]/g)].map((m) => Number(m[1]));
+              return (labelled.length ? labelled : [e.page]).map((page) => ({ source: e.source, page, ...(e.unit ? { unit: e.unit } : {}) }));
+            })
             .filter((c) => {
               const k = `${c.source}#${c.page}`;
               if (seen.has(k)) return false;
@@ -352,13 +358,27 @@ export function TutorWorkspace() {
               // Leave a beat between steps so each one can sink in.
               if (sessionRef.current?.messages.find((m) => m.id === aId)?.steps?.length) await sleep(stepPause(pace));
             }
-            if (!turn.mute && !turn.fast) {
-              turn.speech = voiceOut.speak(speakableText(ev.text), { voiceURI: profile.voice.uri, rate: profile.voice.rate });
-            } else if (!turn.fast) {
-              // Voice off: hold the next step back until this one has been read.
-              turn.speech = sleep(readingDelay(ev.text, pace));
-            }
+            const stepIndex = sessionRef.current?.messages.find((m) => m.id === aId)?.steps?.length ?? 0;
+            const writeOut = !turn.fast && profile.drawAnimation !== false;
+            if (writeOut) setTyping({ id: aId, step: stepIndex, chars: 0 });
             updateMessage(aId, (m) => ({ ...m, steps: [...(m.steps ?? []), { say: ev.text, actions: [] }] }));
+            const speech = !turn.mute && !turn.fast ? voiceOut.speak(speakableText(ev.text), { voiceURI: profile.voice.uri, rate: profile.voice.rate }) : null;
+            if (writeOut) {
+              // Write the explanation into the chat at reading pace; the board drawing for
+              // this step only starts once it's written out.
+              for (const point of revealPoints(ev.text, pace)) {
+                if (turn.fast) break;
+                setTyping({ id: aId, step: stepIndex, chars: point.chars });
+                await sleep(point.delay);
+              }
+              setTyping(null);
+            }
+            if (speech) turn.speech = speech;
+            else if (!turn.fast) {
+              // Voice off: it has just been read while being written; leave a short beat
+              // (or the full reading time if it appeared all at once).
+              turn.speech = sleep(writeOut ? stepPause(pace) : readingDelay(ev.text, pace));
+            }
             break;
           }
           case "board": {
@@ -920,6 +940,7 @@ export function TutorWorkspace() {
                 onRetry={retry}
                 emptyState={emptyState}
                 active={wide || tab === "chat"}
+                typing={typing}
               />
             )}
           </div>

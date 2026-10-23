@@ -60,11 +60,11 @@ export const tutorRequestSchema = z.object({
       z.object({
         source: z.string().max(120),
         page: z.number().int().positive().optional(),
-        unit: z.literal("slide").optional(),
+        unit: z.enum(["slide", "section"]).optional(),
         text: z.string().max(2000),
       }),
     )
-    .max(8)
+    .max(16)
     .default([]),
   /** What the tutor remembers (only sent when the student has memory on). */
   memory: z

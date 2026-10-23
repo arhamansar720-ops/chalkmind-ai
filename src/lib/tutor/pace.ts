@@ -37,3 +37,31 @@ export function stepPause(pace: LessonPace = "normal"): number {
 export function drawSpeed(pace: LessonPace = "normal"): number {
   return FACTOR[pace];
 }
+
+export interface RevealPoint {
+  /** Characters of the text visible after this point. */
+  chars: number;
+  /** Time to wait before revealing the next point. */
+  delay: number;
+}
+
+/**
+ * Word-by-word schedule for writing an explanation into the chat at an
+ * unhurried reading pace. Inline/display math ($…$), **bold** and `code` runs
+ * are revealed whole, so half-written markup never renders.
+ */
+export function revealPoints(text: string, pace: LessonPace = "normal"): RevealPoint[] {
+  const f = FACTOR[pace];
+  const out: RevealPoint[] = [];
+  const re = /\$\$[\s\S]+?\$\$|\$[^$\n]+?\$|\*\*[^*]+?\*\*|`[^`]+`|\S+/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const token = m[0];
+    let delay = token.startsWith("$") ? 420 : 185 + Math.min(150, token.length * 9);
+    if (/[.!?:]$/.test(token)) delay += 280;
+    else if (/[,;]$/.test(token)) delay += 120;
+    out.push({ chars: m.index + token.length, delay: Math.round(delay * f) });
+  }
+  if (out.length) out[out.length - 1].chars = text.length;
+  return out;
+}

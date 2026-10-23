@@ -38,6 +38,7 @@ export function MessageList({
   className,
   emptyState,
   active = true,
+  typing = null,
 }: {
   messages: StoredMessage[];
   streamingId: string | null;
@@ -51,6 +52,8 @@ export function MessageList({
   emptyState?: React.ReactNode;
   /** Re-scroll to the latest message when the list becomes visible (mobile tabs). */
   active?: boolean;
+  /** A step being written out word by word. */
+  typing?: { id: string; step: number; chars: number } | null;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   const last = messages[messages.length - 1];
@@ -58,7 +61,7 @@ export function MessageList({
 
   useEffect(() => {
     if (active) endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
-  }, [messages.length, lastLen, active]);
+  }, [messages.length, lastLen, active, typing?.chars]);
 
   return (
     <div className={cn("min-h-0 flex-1 overflow-y-auto px-4 py-5", className)} aria-live="polite" aria-busy={status !== "idle"}>
@@ -98,6 +101,7 @@ export function MessageList({
                 onShowStep={onShowStep}
                 onRetry={onRetry}
                 onCheck={streamingId === m.id ? onCheck : undefined}
+                typing={typing?.id === m.id ? typing : null}
               />
             )}
           </li>
@@ -109,6 +113,7 @@ export function MessageList({
 }
 
 function AssistantMessage({
+  typing,
   message: m,
   isLast,
   streaming,
@@ -118,6 +123,7 @@ function AssistantMessage({
   onRetry,
   onCheck,
 }: {
+  typing?: { step: number; chars: number } | null;
   message: StoredMessage;
   onCheck?: (a: CheckAnswer) => void;
   isLast: boolean;
@@ -164,7 +170,17 @@ function AssistantMessage({
               <CheckIn key={i} check={s.check} onCheck={onCheck} />
             ) : (
               <div key={i} className="animate-fade-up">
-                <Markdown className="text-[14.5px]">{s.say}</Markdown>
+                {typing?.step === i ? (
+                  <div>
+                    <div aria-hidden>
+                      <Markdown className="text-[14.5px]">{s.say.slice(0, typing.chars) || "\u200b"}</Markdown>
+                    </div>
+                    {/* Screen readers get the whole step at once. */}
+                    <span className="sr-only">{s.say}</span>
+                  </div>
+                ) : (
+                  <Markdown className="text-[14.5px]">{s.say}</Markdown>
+                )}
                 {s.actions.length > 0 && (
                   <button
                     type="button"
@@ -208,7 +224,7 @@ function AssistantMessage({
               <BookOpenText className="size-3.5" /> Searched your documents
             </span>
             <span className="mt-0.5 block text-muted">
-              {m.citations.map((c) => `${c.source}${c.page ? `, ${c.unit === "slide" ? "slide" : "p."} ${c.page}` : ""}`).join(" · ")}
+              {m.citations.map((c) => `${c.source}${c.page ? `, ${c.unit ?? "p."} ${c.page}` : ""}`).join(" · ")}
             </span>
           </div>
         )}
