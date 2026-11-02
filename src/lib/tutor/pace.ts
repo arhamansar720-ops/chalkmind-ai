@@ -28,6 +28,11 @@ export function boardDelay(pace: LessonPace = "normal"): number {
   return Math.round(1000 * FACTOR[pace]);
 }
 
+/** Pen-up pause between drawings when the board draws stroke by stroke (the drawing sets the pace). */
+export function drawGap(pace: LessonPace = "normal"): number {
+  return Math.round(160 * FACTOR[pace]);
+}
+
 /** A breath between steps, after the previous one has been read or spoken. */
 export function stepPause(pace: LessonPace = "normal"): number {
   return Math.round(600 * FACTOR[pace]);

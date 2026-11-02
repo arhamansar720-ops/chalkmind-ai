@@ -7,7 +7,8 @@ import { BLOCK_GAP, COLUMN_PITCH, cursorBelow, layoutStep, nudgeRight, resolvePl
 import { hashString, renderEquation, svgToDataURL } from "./math-svg";
 import { handwrittenMath } from "./text";
 import type { BoardAction } from "./schema";
-import { easeStroke, outlinePoints, partialPath, partialText, planDurations, strokeKind, tipPoint, type Point } from "./stroke";
+import { outlinePoints, partialPath, pathLength, strokeKind, type Point } from "./stroke";
+import { cameraTarget, cameraToScroll, easeCamera, glideEase, penAt, penEase, planPen, scrollToCamera, type Camera, type PenStroke, type Region, type TimedStroke } from "./pen";
 
 type ExcalidrawLib = typeof import("@excalidraw/excalidraw");
 
@@ -44,22 +45,36 @@ export function lookupOnScene({ api, lib }: BoardHandle, id: string): Bounds | n
   return boundsOf(lib, block);
 }
 
+/** Typeset equations by LaTeX source, shared across steps so each one is rendered once. */
+const typeset = new Map<string, Promise<Awaited<ReturnType<typeof renderEquation>> | null>>();
+const typesetOnce = (latex: string) => {
+  let p = typeset.get(latex);
+  if (!p) {
+    p = renderEquation(latex).catch(() => null);
+    typeset.set(latex, p);
+  }
+  return p;
+};
+
+/** Start typesetting a step's equations ahead of drawing it (fire and forget). */
+export function warmEquations(_handle: BoardHandle, actions: BoardAction[], handwriting: boolean) {
+  for (const a of actions) if (a.type === "add_equation" && !(handwriting && handwrittenMath(a.latex))) void typesetOnce(a.latex);
+}
+
 async function prepareEquations(handle: BoardHandle, actions: BoardAction[], handwriting: boolean): Promise<Map<string, PreparedEquation>> {
   const out = new Map<string, PreparedEquation>();
   const existing = handle.api.getFiles();
   const toAdd: BinaryFileData[] = [];
   for (const a of actions) {
     if (a.type !== "add_equation" || out.has(a.latex) || (handwriting && handwrittenMath(a.latex))) continue;
-    try {
-      const eq = await renderEquation(a.latex);
-      const fileId = `eq-${hashString(a.latex)}` as FileId;
-      if (!existing[fileId]) {
-        toAdd.push({ id: fileId, mimeType: "image/svg+xml", dataURL: svgToDataURL(eq.svg) as BinaryFileData["dataURL"], created: Date.now() });
-      }
-      out.set(a.latex, { fileId, width: eq.width, height: eq.height });
-    } catch {
-      /* falls back to monospace text; layout reports a warning */
+    const eq = await typesetOnce(a.latex);
+    // On failure it falls back to monospace text; layout reports a warning.
+    if (!eq) continue;
+    const fileId = `eq-${hashString(a.latex)}` as FileId;
+    if (!existing[fileId]) {
+      toAdd.push({ id: fileId, mimeType: "image/svg+xml", dataURL: svgToDataURL(eq.svg) as BinaryFileData["dataURL"], created: Date.now() });
     }
+    out.set(a.latex, { fileId, width: eq.width, height: eq.height });
   }
   if (toAdd.length) handle.api.addFiles(toAdd);
   return out;
@@ -75,7 +90,7 @@ export interface RenderOptions {
    * `speed` scales the drawing time (1 = normal, higher = slower); `skip`
    * finishes the drawing at once (e.g. when the student presses Stop).
    */
-  draw?: { speed: number; skip: () => boolean };
+  draw?: { speed: number; skip: () => boolean; camera?: CameraControl };
   /** Write simple equations by hand instead of as typeset images. */
   handwriting?: boolean;
 }
@@ -116,14 +131,15 @@ export async function renderActions(handle: BoardHandle, actions: BoardAction[],
   const cursor = placed.cursor ?? result.cursor;
   const registered = result.registered.map((r) => ({ ...r, bounds: { ...r.bounds, x: r.bounds.x + placed.dx, y: r.bounds.y + placed.dy } }));
 
-  // Bring the spot being drawn on into view first, so the student watches it appear.
+  // Bring the spot being drawn on into view first, so the student watches it appear
+  // (when drawing, the camera follows the pen instead).
   const focusEls = result.focus
     ? [...before, ...created].filter((e) => {
         const f = result.focus!;
         return e.x < f.x + f.width && e.x + e.width > f.x && e.y < f.y + f.height && e.y + e.height > f.y;
       })
     : created;
-  if (focusEls.length) {
+  if (focusEls.length && !opts.draw) {
     // On a narrow board, zoom out just enough when new content is wider than the view.
     const state = api.getAppState();
     const viewW = state.width / state.zoom.value;
@@ -133,7 +149,7 @@ export async function renderActions(handle: BoardHandle, actions: BoardAction[],
   }
 
   if (opts.draw && created.length) {
-    await drawIn(handle, created, result.clear, opts.draw);
+    await drawIn(handle, created, result.clear, opts.draw, result.focus);
   } else {
     const current = api.getSceneElements();
     const kept = result.clear ? current.map((el) => lib.newElementWith(el, { isDeleted: true })) : current;
@@ -232,143 +248,283 @@ const nextFrame = () =>
     setTimeout(finish, 100);
   });
 
-const naturalSizes = new Map<string, Promise<{ w: number; h: number } | null>>();
-function naturalSize(dataURL: string): Promise<{ w: number; h: number } | null> {
-  let p = naturalSizes.get(dataURL);
-  if (!p) {
-    p = new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => resolve(img.naturalWidth && img.naturalHeight ? { w: img.naturalWidth, h: img.naturalHeight } : null);
-      img.onerror = () => resolve(null);
-      img.src = dataURL;
-    });
-    naturalSizes.set(dataURL, p);
-  }
-  return p;
+type Skeleton = ExcalidrawElementSkeleton;
+const skeleton = (s: Record<string, unknown>) => s as unknown as Skeleton;
+
+/** How one element is played back: its pen strokes, and what it looks like part-way through. */
+interface Piece {
+  final: ExcalidrawElement;
+  strokes: PenStroke[];
+  /** Elements to show while stroke `local` is `p` (0..1) of the way done; earlier strokes are complete. */
+  draw: (local: number, p: number) => ExcalidrawElement[];
+  /** Pen tip during stroke `local` at progress `p`, in scene coordinates. */
+  tip: (local: number, p: number) => Point | null;
+  /** After the last stroke: a short settle (e.g. a shape's fill fading in), `q` 0..1. */
+  settle?: (q: number) => ExcalidrawElement[];
 }
 
-/**
- * Add `created` to the scene one element at a time, each drawn in over a few
- * frames: text is written character by character, lines and arrows are traced
- * from their start, shape borders are traced around, and equations are wiped
- * in left to right. The intermediate frames are folded into one undo step.
- */
-async function drawIn(handle: BoardHandle, created: ExcalidrawElement[], clear: boolean, draw: { speed: number; skip: () => boolean }) {
-  const { api, lib } = handle;
-  const ours = new Set(created.map((e) => e.id));
-  const temp = new Set<string>();
-  const shown: ExcalidrawElement[] = [];
-  /** Board content as committed before we started, by id (for clear_board). */
-  const original = new Map(api.getSceneElementsIncludingDeleted().map((e) => [e.id, e]));
-  // Equations not drawn yet sit on the board invisibly so their images load before the wipe reaches them.
-  const preload = (from: number) => created.slice(from).filter((e) => e.type === "image").map((e) => lib.newElementWith(e, { opacity: 0 }));
+const SETTLE_MS = 200;
+/** Where the pencil was last seen, so the next drawing can glide on from there. */
+let lastPen: { pos: Point; at: number } | null = null;
 
-  const base = () => api.getSceneElementsIncludingDeleted().filter((e) => !ours.has(e.id) && !temp.has(e.id));
-  const cleared = (els: readonly ExcalidrawElement[]) => (clear ? els.map((el) => (el.isDeleted ? el : lib.newElementWith(el, { isDeleted: true }))) : els);
-
-  // A pencil that follows each stroke, so it looks like someone is writing on the board.
-  const pencil = pencilElement(handle);
-  if (pencil) temp.add(pencil.id);
-  const pen = (el: ExcalidrawElement, t: number): ExcalidrawElement[] => {
-    const tip = pencil && tipPoint(el as unknown as Parameters<typeof tipPoint>[0], t);
-    if (!tip) return [];
-    // A little wobble, like a hand moving the pen.
-    const wobble = Math.sin(t * 47) * 1.4;
-    return [lib.newElementWith(pencil, { x: tip[0] - PENCIL_TIP[0], y: tip[1] - PENCIL_TIP[1] + wobble })];
-  };
-
-  const push = (extra: ExcalidrawElement[], from: number) => {
-    // Keep the pencil on the board (invisibly between strokes) so its image stays loaded.
-    const hiddenPencil = pencil && !extra.some((e) => e.id === pencil.id) ? [lib.newElementWith(pencil, { opacity: 0 })] : [];
-    api.updateScene({ elements: [...cleared(base()), ...shown, ...extra, ...preload(from), ...hiddenPencil], captureUpdate: lib.CaptureUpdateAction.EVENTUALLY });
-  };
-
-  // Excalidraw leaves elements it has never committed out of an undo step (it takes
-  // them for in-progress local drawing), so put the board back the way it was
-  // committed, then add the finished drawing as a single undoable change.
-  const commit = () => {
-    const rest = base().map((e) => (clear && original.has(e.id) ? original.get(e.id)! : e));
-    api.updateScene({ elements: rest, captureUpdate: lib.CaptureUpdateAction.EVENTUALLY });
-    api.updateScene({ elements: [...cleared(rest), ...created], captureUpdate: lib.CaptureUpdateAction.IMMEDIATELY });
-  };
-
-  const durations = planDurations(created as unknown as Parameters<typeof planDurations>[0], draw.speed);
-  try {
-    for (let i = 0; i < created.length; i++) {
-      if (draw.skip()) break;
-      const el = created[i];
-      const frame = await framer(handle, el, temp);
-      const start = performance.now();
-      while (!draw.skip()) {
-        const t = (performance.now() - start) / durations[i];
-        if (t >= 1) break;
-        const p = easeStroke(t);
-        push([...frame(p), ...pen(el, p)], i + 1);
-        await nextFrame();
-      }
-      shown.push(el);
-    }
-  } finally {
-    commit();
-  }
+/** A hidden frame used only to clip an element while it is revealed. */
+function clipFrame(lib: ExcalidrawLib, x: number, y: number, height: number): ExcalidrawElement {
+  return lib.convertToExcalidrawElements([skeleton({ type: "frame", children: [], x, y, width: 1, height, name: "" })], { regenerateIds: true })[0];
 }
 
-type Frame = (t: number) => ExcalidrawElement[];
-
-/** Build the function that renders `el` part-way (0..1) through being drawn. */
-async function framer({ api, lib }: BoardHandle, el: ExcalidrawElement, temp: Set<string>): Promise<Frame> {
+function pieceFor(lib: ExcalidrawLib, el: ExcalidrawElement, temp: Set<string>): Piece {
   const kind = strokeKind(el as unknown as Parameters<typeof strokeKind>[0]);
-  const fade: Frame = (t) => [lib.newElementWith(el, { opacity: Math.round(el.opacity * t) })];
+  const centre: Point = [el.x + el.width / 2, el.y + el.height / 2];
 
   if (kind === "write" && el.type === "text") {
-    return (t) => {
-      const text = partialText(el.text, t);
-      return text ? [lib.newElementWith(el, { text, originalText: text })] : [];
+    // One stand-in text per line, each revealed by its own frame as the pen moves along it.
+    const lineH = el.fontSize * el.lineHeight;
+    const lines = el.text.split("\n").flatMap((line, i) => {
+      if (!line.trim()) return [];
+      const [measured] = lib.convertToExcalidrawElements(
+        [skeleton({ type: "text", x: 0, y: 0, text: line, fontSize: el.fontSize, fontFamily: el.fontFamily, strokeColor: el.strokeColor, opacity: el.opacity, lineHeight: el.lineHeight })],
+        { regenerateIds: true },
+      );
+      if (!measured) return [];
+      const w = measured.width;
+      const x = el.textAlign === "center" ? el.x + (el.width - w) / 2 : el.textAlign === "right" ? el.x + el.width - w : el.x;
+      const y = el.y + i * lineH;
+      const frame = clipFrame(lib, x - 3, y - 6, lineH + 12);
+      temp.add(measured.id).add(frame.id);
+      const text = lib.newElementWith(measured, { x, y, frameId: frame.id, groupIds: [] });
+      const baseline = y + lineH * 0.66;
+      return [{ text, frame, w, x, baseline }];
+    });
+    return {
+      final: el,
+      strokes: lines.map((l) => ({ el: 0, kind, length: l.w, from: [l.x, l.baseline], to: [l.x + l.w, l.baseline] })),
+      draw: (local, p) =>
+        lines.slice(0, local + 1).flatMap((l, i) => {
+          const done = i < local ? 1 : p;
+          if (done <= 0.002) return [];
+          return [lib.newElementWith(l.frame, { width: Math.max(1, (l.w + 6) * done) }), l.text];
+        }),
+      // Bob up and down a little, letter by letter, like a hand writing.
+      tip: (local, p) => {
+        const l = lines[local];
+        return l ? [l.x + l.w * p, l.baseline - 2 - Math.abs(Math.sin((p * l.w) / 9)) * 5] : null;
+      },
     };
   }
+
   if (kind === "trace" && "points" in el) {
     const points = el.points as unknown as Point[];
-    return (t) => [lib.newElementWith(el as never, { points: partialPath(points, t) } as never)];
+    const first = points[0];
+    const last = points[points.length - 1];
+    return {
+      final: el,
+      strokes: [{ el: 0, kind, length: pathLength(points), from: [el.x + first[0], el.y + first[1]], to: [el.x + last[0], el.y + last[1]] }],
+      draw: (_l, p) => (p <= 0.002 ? [] : [lib.newElementWith(el as never, { points: partialPath(points, p) } as never)]),
+      tip: (_l, p) => {
+        const end = partialPath(points, p).at(-1)!;
+        return [el.x + end[0], el.y + end[1]];
+      },
+    };
   }
+
   if (kind === "outline") {
-    // Trace the border with a stand-in line, then swap in the real shape (and its fill).
+    // Trace the border with a stand-in line, then fade the real shape (and its fill) in over it.
     const outline = outlinePoints(el.type, el.width, el.height);
-    const [pen] = lib.convertToExcalidrawElements(
+    const [line] = lib.convertToExcalidrawElements(
       [
-        {
+        skeleton({
           type: "line",
           x: el.x,
           y: el.y,
-          points: outline as [number, number][],
+          points: outline,
           strokeColor: el.strokeColor,
           strokeWidth: el.strokeWidth,
           strokeStyle: el.strokeStyle,
           roughness: el.roughness,
           opacity: el.opacity,
           angle: el.angle,
-        } as unknown as ExcalidrawElementSkeleton,
+          seed: el.seed,
+        }),
       ],
       { regenerateIds: true },
     );
-    if (!pen) return fade;
-    temp.add(pen.id);
-    return (t) => [lib.newElementWith(pen as never, { points: partialPath(outline, t) } as never)];
+    if (line) {
+      temp.add(line.id);
+      return {
+        final: el,
+        strokes: [{ el: 0, kind, length: pathLength(outline), from: [el.x + outline[0][0], el.y + outline[0][1]], to: [el.x + outline[0][0], el.y + outline[0][1]] }],
+        draw: (_l, p) => (p <= 0.002 ? [] : [lib.newElementWith(line as never, { points: partialPath(outline, p) } as never)]),
+        tip: (_l, p) => {
+          const end = partialPath(outline, p).at(-1)!;
+          return [el.x + end[0], el.y + end[1]];
+        },
+        settle: (q) => [line, lib.newElementWith(el, { opacity: Math.round(el.opacity * q) })],
+      };
+    }
   }
-  if (kind === "wipe" && el.type === "image" && el.fileId) {
-    const file = api.getFiles()[el.fileId];
-    const size = file ? await naturalSize(file.dataURL) : null;
-    if (!size) return fade;
-    return (t) =>
-      t <= 0
-        ? []
-        : [
-            lib.newElementWith(el, {
-              width: el.width * t,
-              crop: { x: 0, y: 0, width: size.w * t, height: size.h, naturalWidth: size.w, naturalHeight: size.h },
-            }),
-          ];
+
+  if (kind === "wipe") {
+    // Equations and highlighter marks: revealed left to right behind the pen.
+    const frame = clipFrame(lib, el.x - 2, el.y - 4, el.height + 8);
+    temp.add(frame.id);
+    const shown = lib.newElementWith(el, { frameId: frame.id });
+    const writing = el.type === "image";
+    const y = el.y + el.height * (writing ? 0.6 : 0.5);
+    return {
+      final: el,
+      strokes: [{ el: 0, kind, length: el.width, from: [el.x, y], to: [el.x + el.width, y] }],
+      draw: (_l, p) => (p <= 0.002 ? [] : [lib.newElementWith(frame, { width: Math.max(1, (el.width + 4) * p) }), shown]),
+      tip: (_l, p) => [el.x + el.width * p, writing ? y - Math.abs(Math.sin((p * el.width) / 10)) * 6 : y],
+    };
   }
-  return fade;
+
+  return {
+    final: el,
+    strokes: [{ el: 0, kind: "fade", length: 0, from: centre, to: centre }],
+    draw: (_l, p) => [lib.newElementWith(el, { opacity: Math.round(el.opacity * p) })],
+    tip: () => null,
+  };
+}
+
+/** What the student set for the camera during this turn; `follow` turns off once they move the board themselves. */
+export interface CameraControl {
+  follow: boolean;
+}
+
+/**
+ * Draw `created` in one continuous motion: a pencil writes each line, traces
+ * each stroke and wipes in each equation at a steady speed, gliding from one
+ * stroke to the next, while the view follows it — zooming out when the new
+ * content doesn't fit and back in when it's small. Frames are rendered at the
+ * display's refresh rate, and progress is time-based, so it stays smooth on a
+ * 120 Hz screen and doesn't slow down on a busy one. The intermediate frames
+ * are folded into one undo step.
+ */
+async function drawIn(
+  handle: BoardHandle,
+  created: ExcalidrawElement[],
+  clear: boolean,
+  draw: { speed: number; skip: () => boolean; camera?: CameraControl },
+  focus: Bounds | null,
+) {
+  const { api, lib } = handle;
+  const ours = new Set(created.map((e) => e.id));
+  const temp = new Set<string>();
+  /** Board content as committed before we started, by id (for clear_board). */
+  const original = new Map(api.getSceneElementsIncludingDeleted().map((e) => [e.id, e]));
+  const base = () => api.getSceneElementsIncludingDeleted().filter((e) => !ours.has(e.id) && !temp.has(e.id));
+  const cleared = (els: readonly ExcalidrawElement[]) => (clear ? els.map((el) => (el.isDeleted ? el : lib.newElementWith(el, { isDeleted: true }))) : els);
+
+  const pieces = created.map((el) => pieceFor(lib, el, temp));
+  const strokes = pieces.flatMap((piece, el) => piece.strokes.map((s, local) => ({ ...s, el, local })));
+  // Carry on from where the pen stopped on the previous item, if that was just now.
+  const resume = lastPen && performance.now() - lastPen.at < 2500 ? lastPen.pos : undefined;
+  const plan = planPen(strokes, draw.speed, undefined, resume);
+  const timed = plan.strokes as (TimedStroke & { local: number })[];
+  const span = pieces.map((_, i) => {
+    const mine = timed.filter((s) => s.el === i);
+    return { start: mine[0]?.start ?? 0, end: mine.at(-1)?.end ?? 0 };
+  });
+
+  const pencil = pencilElement(handle);
+  if (pencil) temp.add(pencil.id);
+  const pencilAt = (tip: Point, zoom: number, lifted: boolean) => {
+    // Keep the pencil the same size on screen whatever the zoom.
+    const k = 1 / Math.max(0.35, zoom);
+    return lib.newElementWith(pencil!, {
+      x: tip[0] - PENCIL_TIP[0] * k,
+      y: tip[1] - PENCIL_TIP[1] * k - (lifted ? 7 * k : 0),
+      width: PENCIL_SIZE * k,
+      height: PENCIL_SIZE * k,
+      opacity: lifted ? 80 : 100,
+    });
+  };
+
+  // The region the view keeps in frame: everything this action draws (and what a highlight points at).
+  const [minX, minY, maxX, maxY] = lib.getCommonBounds(created);
+  let region: Region = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  if (focus) {
+    const x = Math.min(region.x, focus.x);
+    const y = Math.min(region.y, focus.y);
+    region = { x, y, width: Math.max(region.x + region.width, focus.x + focus.width) - x, height: Math.max(region.y + region.height, focus.y + focus.height) - y };
+  }
+
+  const initial = api.getAppState();
+  const frameRendering = initial.frameRendering;
+  let cam: Camera = scrollToCamera({ scrollX: initial.scrollX, scrollY: initial.scrollY, zoom: initial.zoom.value }, initial.width, initial.height);
+  let expected: { scrollX: number; scrollY: number; zoom: number } | null = null;
+  const camera = draw.camera ?? { follow: true };
+
+  const commit = () => {
+    // Excalidraw leaves elements it has never committed out of an undo step (it takes
+    // them for in-progress local drawing), so put the board back the way it was
+    // committed, then add the finished drawing as a single undoable change.
+    const rest = base().map((e) => (clear && original.has(e.id) ? original.get(e.id)! : e));
+    api.updateScene({ elements: rest, captureUpdate: lib.CaptureUpdateAction.EVENTUALLY });
+    api.updateScene({ elements: [...cleared(rest), ...created], appState: { frameRendering }, captureUpdate: lib.CaptureUpdateAction.IMMEDIATELY });
+  };
+
+  const t0 = performance.now();
+  let last = t0;
+  let penPos: Point | null = resume ?? null;
+  try {
+    while (!draw.skip()) {
+      const now = performance.now();
+      const t = now - t0;
+      const dt = Math.min(64, now - last);
+      last = now;
+
+      const shown: ExcalidrawElement[] = [];
+      for (let i = 0; i < pieces.length; i++) {
+        const piece = pieces[i];
+        const { start, end } = span[i];
+        if (t >= end + (piece.settle ? SETTLE_MS : 0)) shown.push(piece.final);
+        else if (t >= end && piece.settle) shown.push(...piece.settle((t - end) / SETTLE_MS));
+        else if (t >= start) {
+          const active = timed.find((s) => s.el === i && t < s.end)!;
+          const p = t < active.start ? 0 : penEase((t - active.start) / (active.end - active.start));
+          shown.push(...piece.draw(active.local, p));
+        } else if (piece.final.type === "image") {
+          // Not reached yet: on the board invisibly, so its image is loaded by the time the pen gets there.
+          shown.push(lib.newElementWith(piece.final, { opacity: 0 }));
+        }
+      }
+
+      const at = penAt(timed, t);
+      let lifted = false;
+      if (at.state === "draw") {
+        const s = timed[at.index];
+        penPos = pieces[s.el].tip(s.local, penEase(at.p)) ?? penPos;
+      } else if (at.state === "glide") {
+        const next = timed[at.index];
+        const from: Point = at.index > 0 ? (pieces[timed[at.index - 1].el].tip(timed[at.index - 1].local, 1) ?? timed[at.index - 1].to) : (resume ?? next.from);
+        const g = glideEase(at.p);
+        penPos = [from[0] + (next.from[0] - from[0]) * g, from[1] + (next.from[1] - from[1]) * g];
+        lifted = true;
+      } else penPos = null;
+      if (penPos) lastPen = { pos: penPos, at: now };
+
+      // Follow the pen, unless the student has taken over the view.
+      const state = api.getAppState();
+      if (expected && camera.follow && (Math.abs(state.scrollX - expected.scrollX) > 1 || Math.abs(state.scrollY - expected.scrollY) > 1 || Math.abs(state.zoom.value - expected.zoom) > 0.002)) {
+        camera.follow = false;
+      }
+      let appState: Record<string, unknown> | undefined = t === 0 || !expected ? { frameRendering: { enabled: true, clip: true, name: false, outline: false } } : undefined;
+      if (camera.follow) {
+        cam = easeCamera(cam, cameraTarget(cam, region, penPos, state.width, state.height), dt);
+        expected = cameraToScroll(cam, state.width, state.height);
+        appState = { ...appState, scrollX: expected.scrollX, scrollY: expected.scrollY, zoom: { value: expected.zoom } };
+      } else expected = expected ?? { scrollX: state.scrollX, scrollY: state.scrollY, zoom: state.zoom.value };
+
+      const pen = pencil && penPos ? [pencilAt(penPos, cam.zoom, lifted)] : pencil ? [lib.newElementWith(pencil, { opacity: 0 })] : [];
+      api.updateScene({ elements: [...cleared(base()), ...shown, ...pen], ...(appState ? { appState: appState as never } : {}), captureUpdate: lib.CaptureUpdateAction.EVENTUALLY });
+
+      if (t >= plan.total + SETTLE_MS) break;
+      await nextFrame();
+    }
+  } finally {
+    commit();
+  }
 }
 
 /** Clear the board as one undoable change. */

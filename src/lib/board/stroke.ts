@@ -1,8 +1,8 @@
 /**
- * Geometry and timing for drawing board items stroke by stroke, the way a
- * tutor would with a marker, instead of popping them onto the board whole.
- * Pure functions (no Excalidraw import) so they are unit-tested directly;
- * ./render.ts applies them to real elements frame by frame.
+ * Geometry for drawing board items stroke by stroke, the way a tutor would
+ * with a marker, instead of popping them onto the board whole. Pure (no
+ * Excalidraw import) so it is unit-tested directly; ./pen.ts times the
+ * strokes and ./render.ts plays them back.
  */
 
 export type Point = readonly [number, number];
@@ -31,7 +31,8 @@ export function strokeKind(el: StrokeTarget): StrokeKind {
     case "rectangle":
     case "ellipse":
     case "diamond":
-      return el.strokeColor && el.strokeColor !== "transparent" ? "outline" : "fade";
+      // Filled marks with no border (highlights) are swept in like a highlighter.
+      return el.strokeColor && el.strokeColor !== "transparent" ? "outline" : "wipe";
     case "image":
       return "wipe";
     default:
@@ -94,90 +95,4 @@ export function outlinePoints(type: string, width: number, height: number): Poin
     [0, height],
     [0, 0],
   ];
-}
-
-/** The visible part of text after `t` of its writing time. */
-export function partialText(text: string, t: number): string {
-  if (t >= 1) return text;
-  const chars = [...text];
-  return chars.slice(0, Math.floor(chars.length * Math.max(0, t))).join("");
-}
-
-const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
-
-/** Natural drawing time for one element, in ms at normal pace. */
-export function strokeDuration(el: StrokeTarget, kind: StrokeKind = strokeKind(el)): number {
-  switch (kind) {
-    case "write":
-      return clamp([...(el.text ?? "")].length * 65, 450, 2800);
-    case "trace":
-      return clamp(pathLength(el.points ?? []) * 2.2, 350, 1600);
-    case "outline":
-      return clamp(pathLength(outlinePoints(el.type, el.width, el.height)) * 1.7, 500, 1700);
-    case "wipe":
-      return clamp(el.width * 6, 800, 3200);
-    case "fade":
-      return 350;
-  }
-}
-
-/** Upper bound for drawing one board action, so big tables and graphs don't drag on. */
-export const MAX_ACTION_DRAW_MS = 7000;
-
-/**
- * Per-element durations for drawing a set of elements in order, scaled by
- * pace (`speed` 1 = normal, higher = slower) and squeezed into the budget.
- */
-export function planDurations(els: StrokeTarget[], speed = 1, budget = MAX_ACTION_DRAW_MS): number[] {
-  const raw = els.map((el) => strokeDuration(el) * speed);
-  const total = raw.reduce((a, b) => a + b, 0);
-  const cap = budget * speed;
-  const k = total > cap ? cap / total : 1;
-  return raw.map((ms) => Math.max(16, Math.round(ms * k)));
-}
-
-/** Ease-out so strokes start quick and settle, like a pen. */
-export function easeStroke(t: number): number {
-  return 1 - Math.pow(1 - clamp(t, 0, 1), 2);
-}
-
-export interface TipTarget extends StrokeTarget {
-  x: number;
-  y: number;
-}
-
-/**
- * Where the pen is `t` (0..1) of the way through drawing an element, in scene
- * coordinates — shown as a marker tip so the student sees it being written.
- */
-export function tipPoint(el: TipTarget, t: number, kind: StrokeKind = strokeKind(el)): Point | null {
-  if (t <= 0 || t >= 1) return null;
-  switch (kind) {
-    case "write": {
-      const lines = (el.text ?? "").split("\n");
-      const total = lines.reduce((n, l) => n + [...l].length, 0) || 1;
-      const longest = Math.max(1, ...lines.map((l) => [...l].length));
-      let left = Math.floor(total * t);
-      for (let i = 0; i < lines.length; i++) {
-        const len = [...lines[i]].length;
-        if (left <= len || i === lines.length - 1) {
-          return [el.x + el.width * (Math.min(left, len) / longest), el.y + ((i + 0.7) * el.height) / lines.length];
-        }
-        left -= len;
-      }
-      return null;
-    }
-    case "trace": {
-      const p = partialPath(el.points ?? [], t).at(-1);
-      return p ? [el.x + p[0], el.y + p[1]] : null;
-    }
-    case "outline": {
-      const p = partialPath(outlinePoints(el.type, el.width, el.height), t).at(-1);
-      return p ? [el.x + p[0], el.y + p[1]] : null;
-    }
-    case "wipe":
-      return [el.x + el.width * t, el.y + el.height * 0.55];
-    case "fade":
-      return null;
-  }
 }

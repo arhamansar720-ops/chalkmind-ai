@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { BookmarkPlus, Check, CheckCircle2, Hourglass, MessagesSquare, PencilRuler, Shuffle, Volume2, VolumeX } from "lucide-react";
 import { boardIndexFromElements, emptyCursor, type Cursor, type RegisteredItem } from "@/lib/board/layout";
-import { clearScene, cursorForScene, renderActions, snapshotScene, type BoardHandle } from "@/lib/board/render";
+import { clearScene, cursorForScene, renderActions, snapshotScene, warmEquations, type BoardHandle, type CameraControl } from "@/lib/board/render";
 import { ApiError, postJSON, streamTutor } from "@/lib/client/api";
 import { attachedExcerpts, attachmentKind, ingestDocument, retrieveExcerpts, type Excerpt } from "@/lib/client/documents";
 import type { ComposerAttachment } from "./Composer";
@@ -19,7 +19,7 @@ import { assistantContextText, createSession, historyForRequest, mergeBoardIndex
 import { cn, imageFileToDataUrl, speakableText } from "@/lib/utils";
 import { useVoiceInput, useVoiceOutput } from "@/lib/voice/hooks";
 import { Blur, Reveal } from "@/components/Motion";
-import { boardDelay, drawSpeed, readingDelay, revealPoints, stepPause } from "@/lib/tutor/pace";
+import { boardDelay, drawGap, drawSpeed, readingDelay, revealPoints, stepPause } from "@/lib/tutor/pace";
 import { formatCountdown, useCountdown } from "@/lib/client/countdown";
 import { Badge, Button, ConfirmDialog, IconButton, Spinner } from "@/components/ui";
 import { SetupNotice } from "@/components/SetupNotice";
@@ -50,6 +50,8 @@ interface Turn {
   stopped: boolean;
   /** Question to ask once this turn has wrapped up (from a check-in answer). */
   next?: { text: string; checkIn?: string };
+  /** The board view follows the pen until the student moves it themselves. */
+  camera: CameraControl;
 }
 
 interface AskOptions {
@@ -333,6 +335,7 @@ export function TutorWorkspace() {
         fast: false,
         mute: !profile.voice.autoSpeak,
         stopped: false,
+        camera: { follow: true },
       };
       turnRef.current = turn;
       const controller = new AbortController();
@@ -408,6 +411,9 @@ export function TutorWorkspace() {
               steps[steps.length - 1] = { ...steps[steps.length - 1], boardStep: step };
               return { ...m, steps };
             });
+            const drawing = profile.drawAnimation !== false && !turn.fast;
+            // Typeset this step's equations up front, so the pen never waits on them between items.
+            warmEquations(h, ev.actions, profile.drawAnimation !== false);
             for (const action of ev.actions) {
               try {
                 const res = await renderActions(h, [action], {
@@ -417,7 +423,7 @@ export function TutorWorkspace() {
                   animate: animate && !turn.fast,
                   // Drawing is the lesson itself, so it follows the student's setting rather than reduced motion.
                   handwriting: profile.drawAnimation !== false,
-                  ...(profile.drawAnimation !== false && !turn.fast ? { draw: { speed: drawSpeed(pace), skip: () => turn.fast || turn.stopped } } : {}),
+                  ...(drawing && !turn.fast ? { draw: { speed: drawSpeed(pace), skip: () => turn.fast || turn.stopped, camera: turn.camera } } : {}),
                 });
                 turn.cursor = res.cursor;
                 if (res.cleared) {
@@ -435,7 +441,7 @@ export function TutorWorkspace() {
                 updateMessage(aId, (m) => ({ ...m, notices: [...(m.notices ?? []), `Couldn't draw a ${action.type.replace("add_", "")} on the board.`] }));
               }
               setBoardEmpty(h.api.getSceneElements().length === 0);
-              if (!turn.fast) await sleep(animate ? boardDelay(pace) : boardDelay(pace) / 2);
+              if (!turn.fast) await sleep(drawing ? drawGap(pace) : animate ? boardDelay(pace) : boardDelay(pace) / 2);
             }
             break;
           }
